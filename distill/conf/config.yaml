@@ -1,0 +1,36 @@
+defaults:
+  - _self_
+
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+wandb:
+  project: "one-pass-distill"
+  entity: null  # Set your wandb entity here if needed
+  name: "${now:%Y-%m-%d_%H-%M-%S}"
+  mode: "online" # or "disabled" for debugging
+
+data:
+  batch_size: 128
+  num_workers: 4
+  dataset_name: "cifar10" # or "cifar10", etc.
+  input_dim: 3*32*32 # for synthetic data
+  num_samples: 10000 # for synthetic data
+
+model:
+  teacher_hidden_dim: 256
+  student_hidden_dim: 128
+  output_dim: 10 # Number of classes or output features
+
+distill:
+  lambda_reg: 1e-4 # Ridge regression regularization
+  projection_dim: 2048 # Random feature dimension (D)
+  activation: "gelu" # relu, gelu, etc.
+  init_scale: 1.0 # Base scale for random matrix initialization
+  init_method: "gaussian" # gaussian, orthogonal
+  scales: [1.0] # List of scales for multi-scale initialization
+  adapter_depth: 1 # Number of random layers (Deep RFM)
+  solver_device: "cpu" # Device for solving linear system (cpu recommended for large D)
+  use_feature_distillation: false # If true, distill hidden states. If false, distill logits.
+  low_rank_dim: 0 # If > 0 and use_feature_distillation is false, project logits to this dim.
