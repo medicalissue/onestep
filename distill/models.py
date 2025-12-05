@@ -5,36 +5,97 @@ from .utils import get_activation
 
 import torchvision
 
+import timm
+import torch.nn as nn
+import torchvision
+from huggingface_hub import hf_hub_download
+import torch
+
 class ResNetWrapper(nn.Module):
-    def __init__(self, num_classes=10, pretrained=True):
+    def __init__(self, num_classes=10, pretrained=True, repo_id=None):
         super().__init__()
-        # Use ResNet18
-        weights = torchvision.models.ResNet18_Weights.DEFAULT if pretrained else None
-        self.net = torchvision.models.resnet18(weights=weights)
-        
-        # Replace fc if num_classes != 1000
-        if num_classes != 1000:
-            self.net.fc = nn.Linear(self.net.fc.in_features, num_classes)
+        if repo_id:
+            # Load from Hugging Face manually to handle architecture mismatch (CIFAR-10 ResNet)
+            # Standard ResNet18 has 7x7 conv and maxpool. CIFAR-10 ResNet usually has 3x3 conv and no maxpool.
+            self.net = timm.create_model("resnet18", pretrained=False, num_classes=num_classes)
+            
+            # Modify for CIFAR-10
+            self.net.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            self.net.maxpool = nn.Identity() # Remove maxpool
+            
+            if pretrained:
+                # Download and load weights
+                try:
+                    weights_path = hf_hub_download(repo_id=repo_id, filename="pytorch_model.bin")
+                    state_dict = torch.load(weights_path, map_location="cpu")
+                    
+                    # Handle potential key mismatches (e.g. 'net.' prefix or different head names)
+                    # The error showed 'conv1.weight' mismatch, so keys likely match standard ResNet.
+                    # But let's be safe.
+                    self.net.load_state_dict(state_dict, strict=False) # strict=False to be safe, but we want to ensure core matches
+                except Exception as e:
+                    print(f"Failed to load weights from {repo_id}: {e}")
+                    # Fallback or error out? User requested this model.
+                    raise e
+        else:
+            # Use torchvision ResNet18
+            weights = torchvision.models.ResNet18_Weights.DEFAULT if pretrained else None
+            self.net = torchvision.models.resnet18(weights=weights)
+            # Replace fc if num_classes != 1000
+            if num_classes != 1000:
+                self.net.fc = nn.Linear(self.net.fc.in_features, num_classes)
             
     def forward(self, x, return_hidden=False):
-        # We need to reimplement forward to get the penultimate layer
-        x = self.net.conv1(x)
-        x = self.net.bn1(x)
-        x = self.net.relu(x)
-        x = self.net.maxpool(x)
-
-        x = self.net.layer1(x)
-        x = self.net.layer2(x)
-        x = self.net.layer3(x)
-        x = self.net.layer4(x)
-
-        x = self.net.avgpool(x)
-        h = torch.flatten(x, 1)
-        out = self.net.fc(h)
+        # Timm ResNet forward structure might differ slightly from torchvision
+        # But for standard ResNet, it's usually compatible or we can use features_only=True
+        # Let's assume standard structure for now, but handle potential naming diffs if needed.
+        # Actually, timm models have a forward_features method.
         
-        if return_hidden:
-            return out, h
-        return out
+        if hasattr(self.net, 'forward_features'):
+            # Timm style
+            features = self.net.forward_features(x)
+            # features is usually (B, C, H, W) before pooling for some models, or pooled.
+            # For ResNet in timm, forward_features returns unpooled features (B, 512, 1, 1) or (B, 512, H, W)
+            # Let's check output shape or just use standard forward if we don't need intermediate
+            
+            # Re-implementing forward for flexibility (penultimate layer access)
+            # Timm ResNet: conv1, bn1, act1, maxpool, layer1-4, global_pool, fc
+            x = self.net.conv1(x)
+            x = self.net.bn1(x)
+            x = self.net.act1(x)
+            x = self.net.maxpool(x)
+
+            x = self.net.layer1(x)
+            x = self.net.layer2(x)
+            x = self.net.layer3(x)
+            x = self.net.layer4(x)
+            
+            x = self.net.global_pool(x)
+            h = torch.flatten(x, 1)
+            out = self.net.fc(h)
+            
+            if return_hidden:
+                return out, h
+            return out
+        else:
+            # Torchvision style
+            x = self.net.conv1(x)
+            x = self.net.bn1(x)
+            x = self.net.relu(x)
+            x = self.net.maxpool(x)
+
+            x = self.net.layer1(x)
+            x = self.net.layer2(x)
+            x = self.net.layer3(x)
+            x = self.net.layer4(x)
+
+            x = self.net.avgpool(x)
+            h = torch.flatten(x, 1)
+            out = self.net.fc(h)
+            
+            if return_hidden:
+                return out, h
+            return out
 
 class SimpleCNN(nn.Module):
     def __init__(self, num_classes=10):

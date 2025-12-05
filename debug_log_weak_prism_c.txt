@@ -1,0 +1,93 @@
+wandb:
+  project: one-pass-distill
+  entity: null
+  name: ${now:%Y-%m-%d_%H-%M-%S}
+  mode: disabled
+data:
+  batch_size: 128
+  num_workers: 4
+  dataset_name: cifar10
+  input_dim: 3*32*32
+  num_samples: 10000
+model:
+  teacher_hidden_dim: 256
+  student_hidden_dim: 128
+  output_dim: 10
+distill:
+  beta: 1.0
+  eta1: 1.0
+  eta2: 1.0
+  lr: 0.01
+  epochs: 10
+  momentum: 0.9
+  weight_decay: 0.0005
+  epsilon: 0.0
+  alpha: 0.0
+  projection_dim: 4096
+  activation: gelu
+  init_scale: 1.0
+  init_method: gaussian
+  scales:
+  - 1.0
+  adapter_depth: 2
+  solver_device: cpu
+  use_feature_distillation: true
+  low_rank_dim: 0
+  num_boosting_stages: 10
+  teacher_path: weak_teacher.pth
+
+[2025-12-05 12:34:07,872][__main__][INFO] - Loading CIFAR-10...
+[2025-12-05 12:34:09,219][__main__][INFO] - Loading Teacher from local path: weak_teacher.pth...
+[2025-12-05 12:34:09,490][__main__][INFO] - Initializing Student (SimpleCNN)...
+[2025-12-05 12:34:09,492][__main__][INFO] - Starting PRISM Training (Epochs: 10, Beta: 1.0)...
+[2025-12-05 12:34:10,129][__main__][INFO] - Epoch [1/10] Batch [0] Loss: 2.4658 Acc: 7.81% Lambda: 0.7813 Alpha(T.Acc): 0.6250
+[2025-12-05 12:34:10,843][__main__][INFO] - Epoch [1/10] Batch [100] Loss: 1.5041 Acc: 39.25% Lambda: 0.7705 Alpha(T.Acc): 0.6406
+[2025-12-05 12:34:11,471][__main__][INFO] - Epoch [1/10] Batch [200] Loss: 1.3822 Acc: 44.86% Lambda: 0.7614 Alpha(T.Acc): 0.6094
+[2025-12-05 12:34:12,114][__main__][INFO] - Epoch [1/10] Batch [300] Loss: 1.2386 Acc: 48.94% Lambda: 0.7560 Alpha(T.Acc): 0.5938
+[2025-12-05 12:34:13,095][__main__][INFO] - Epoch 1 Test Accuracy: 60.50%
+[2025-12-05 12:34:13,198][__main__][INFO] - Epoch [2/10] Batch [0] Loss: 1.1218 Acc: 64.06% Lambda: 0.7632 Alpha(T.Acc): 0.6328
+[2025-12-05 12:34:13,838][__main__][INFO] - Epoch [2/10] Batch [100] Loss: 1.0096 Acc: 60.10% Lambda: 0.7707 Alpha(T.Acc): 0.6172
+[2025-12-05 12:34:14,455][__main__][INFO] - Epoch [2/10] Batch [200] Loss: 1.0848 Acc: 61.10% Lambda: 0.7713 Alpha(T.Acc): 0.6250
+[2025-12-05 12:34:15,095][__main__][INFO] - Epoch [2/10] Batch [300] Loss: 1.0488 Acc: 61.60% Lambda: 0.7473 Alpha(T.Acc): 0.6641
+[2025-12-05 12:34:16,076][__main__][INFO] - Epoch 2 Test Accuracy: 64.70%
+[2025-12-05 12:34:16,182][__main__][INFO] - Epoch [3/10] Batch [0] Loss: 1.1348 Acc: 66.41% Lambda: 0.7669 Alpha(T.Acc): 0.6172
+[2025-12-05 12:34:16,801][__main__][INFO] - Epoch [3/10] Batch [100] Loss: 1.0532 Acc: 64.51% Lambda: 0.7629 Alpha(T.Acc): 0.6406
+[2025-12-05 12:34:17,420][__main__][INFO] - Epoch [3/10] Batch [200] Loss: 1.0316 Acc: 64.76% Lambda: 0.7673 Alpha(T.Acc): 0.6250
+[2025-12-05 12:34:18,037][__main__][INFO] - Epoch [3/10] Batch [300] Loss: 0.9554 Acc: 64.87% Lambda: 0.7654 Alpha(T.Acc): 0.6094
+[2025-12-05 12:34:18,963][__main__][INFO] - Epoch 3 Test Accuracy: 68.21%
+[2025-12-05 12:34:19,054][__main__][INFO] - Epoch [4/10] Batch [0] Loss: 0.9548 Acc: 68.75% Lambda: 0.7586 Alpha(T.Acc): 0.6484
+[2025-12-05 12:34:19,645][__main__][INFO] - Epoch [4/10] Batch [100] Loss: 1.0128 Acc: 66.34% Lambda: 0.7592 Alpha(T.Acc): 0.6172
+[2025-12-05 12:34:20,250][__main__][INFO] - Epoch [4/10] Batch [200] Loss: 0.9416 Acc: 66.06% Lambda: 0.7647 Alpha(T.Acc): 0.6641
+[2025-12-05 12:34:20,862][__main__][INFO] - Epoch [4/10] Batch [300] Loss: 0.9105 Acc: 66.26% Lambda: 0.7736 Alpha(T.Acc): 0.6484
+[2025-12-05 12:34:21,871][__main__][INFO] - Epoch 4 Test Accuracy: 69.56%
+[2025-12-05 12:34:21,976][__main__][INFO] - Epoch [5/10] Batch [0] Loss: 0.7292 Acc: 74.22% Lambda: 0.7821 Alpha(T.Acc): 0.7031
+[2025-12-05 12:34:22,558][__main__][INFO] - Epoch [5/10] Batch [100] Loss: 0.9636 Acc: 66.97% Lambda: 0.7620 Alpha(T.Acc): 0.5859
+[2025-12-05 12:34:23,109][__main__][INFO] - Epoch [5/10] Batch [200] Loss: 0.9326 Acc: 67.17% Lambda: 0.7806 Alpha(T.Acc): 0.6562
+[2025-12-05 12:34:23,700][__main__][INFO] - Epoch [5/10] Batch [300] Loss: 0.9664 Acc: 67.48% Lambda: 0.7620 Alpha(T.Acc): 0.6562
+[2025-12-05 12:34:24,678][__main__][INFO] - Epoch 5 Test Accuracy: 69.08%
+[2025-12-05 12:34:24,772][__main__][INFO] - Epoch [6/10] Batch [0] Loss: 0.9370 Acc: 68.75% Lambda: 0.7698 Alpha(T.Acc): 0.6406
+[2025-12-05 12:34:25,505][__main__][INFO] - Epoch [6/10] Batch [100] Loss: 0.9111 Acc: 68.84% Lambda: 0.7619 Alpha(T.Acc): 0.5625
+[2025-12-05 12:34:26,188][__main__][INFO] - Epoch [6/10] Batch [200] Loss: 0.9508 Acc: 68.75% Lambda: 0.7571 Alpha(T.Acc): 0.6406
+[2025-12-05 12:34:26,890][__main__][INFO] - Epoch [6/10] Batch [300] Loss: 1.0430 Acc: 68.75% Lambda: 0.7542 Alpha(T.Acc): 0.5859
+[2025-12-05 12:34:27,938][__main__][INFO] - Epoch 6 Test Accuracy: 70.30%
+[2025-12-05 12:34:28,047][__main__][INFO] - Epoch [7/10] Batch [0] Loss: 0.8858 Acc: 73.44% Lambda: 0.7576 Alpha(T.Acc): 0.6797
+[2025-12-05 12:34:28,682][__main__][INFO] - Epoch [7/10] Batch [100] Loss: 0.8365 Acc: 70.11% Lambda: 0.7697 Alpha(T.Acc): 0.6719
+[2025-12-05 12:34:29,295][__main__][INFO] - Epoch [7/10] Batch [200] Loss: 0.8698 Acc: 70.10% Lambda: 0.7742 Alpha(T.Acc): 0.6719
+[2025-12-05 12:34:29,938][__main__][INFO] - Epoch [7/10] Batch [300] Loss: 0.8471 Acc: 70.12% Lambda: 0.7675 Alpha(T.Acc): 0.6484
+[2025-12-05 12:34:31,012][__main__][INFO] - Epoch 7 Test Accuracy: 71.05%
+[2025-12-05 12:34:31,117][__main__][INFO] - Epoch [8/10] Batch [0] Loss: 0.9295 Acc: 71.09% Lambda: 0.7578 Alpha(T.Acc): 0.6094
+[2025-12-05 12:34:31,787][__main__][INFO] - Epoch [8/10] Batch [100] Loss: 0.9116 Acc: 71.46% Lambda: 0.7605 Alpha(T.Acc): 0.6172
+[2025-12-05 12:34:32,476][__main__][INFO] - Epoch [8/10] Batch [200] Loss: 0.8070 Acc: 71.19% Lambda: 0.7668 Alpha(T.Acc): 0.6875
+[2025-12-05 12:34:33,095][__main__][INFO] - Epoch [8/10] Batch [300] Loss: 0.8560 Acc: 71.17% Lambda: 0.7722 Alpha(T.Acc): 0.6797
+[2025-12-05 12:34:34,074][__main__][INFO] - Epoch 8 Test Accuracy: 72.37%
+[2025-12-05 12:34:34,176][__main__][INFO] - Epoch [9/10] Batch [0] Loss: 0.8531 Acc: 70.31% Lambda: 0.7631 Alpha(T.Acc): 0.6328
+[2025-12-05 12:34:34,771][__main__][INFO] - Epoch [9/10] Batch [100] Loss: 0.8332 Acc: 71.16% Lambda: 0.7535 Alpha(T.Acc): 0.6406
+[2025-12-05 12:34:35,407][__main__][INFO] - Epoch [9/10] Batch [200] Loss: 0.9144 Acc: 71.11% Lambda: 0.7549 Alpha(T.Acc): 0.5781
+[2025-12-05 12:34:36,118][__main__][INFO] - Epoch [9/10] Batch [300] Loss: 0.9287 Acc: 71.27% Lambda: 0.7539 Alpha(T.Acc): 0.6172
+[2025-12-05 12:34:37,067][__main__][INFO] - Epoch 9 Test Accuracy: 72.37%
+[2025-12-05 12:34:37,172][__main__][INFO] - Epoch [10/10] Batch [0] Loss: 0.8221 Acc: 75.00% Lambda: 0.7687 Alpha(T.Acc): 0.6797
+[2025-12-05 12:34:37,752][__main__][INFO] - Epoch [10/10] Batch [100] Loss: 0.7414 Acc: 71.77% Lambda: 0.7566 Alpha(T.Acc): 0.6641
+[2025-12-05 12:34:38,316][__main__][INFO] - Epoch [10/10] Batch [200] Loss: 0.8663 Acc: 71.68% Lambda: 0.7686 Alpha(T.Acc): 0.5859
+[2025-12-05 12:34:38,891][__main__][INFO] - Epoch [10/10] Batch [300] Loss: 0.7433 Acc: 71.64% Lambda: 0.7665 Alpha(T.Acc): 0.6797
+[2025-12-05 12:34:39,767][__main__][INFO] - Epoch 10 Test Accuracy: 72.68%
+[2025-12-05 12:34:39,768][__main__][INFO] - PRISM Training Complete.

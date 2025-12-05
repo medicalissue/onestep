@@ -24,13 +24,25 @@ model:
   output_dim: 10 # Number of classes or output features
 
 distill:
-  lambda_reg: 1e-4 # Ridge regression regularization
-  projection_dim: 2048 # Random feature dimension (D)
-  activation: "gelu" # relu, gelu, etc.
-  init_scale: 1.0 # Base scale for random matrix initialization
-  init_method: "gaussian" # gaussian, orthogonal
-  scales: [1.0] # List of scales for multi-scale initialization
-  adapter_depth: 1 # Number of random layers (Deep RFM)
-  solver_device: "cpu" # Device for solving linear system (cpu recommended for large D)
-  use_feature_distillation: false # If true, distill hidden states. If false, distill logits.
-  low_rank_dim: 0 # If > 0 and use_feature_distillation is false, project logits to this dim.
+  # PRISM Hyperparameters
+  beta: 1.0 # Entropy sensitivity
+  eta1: 1.0 # Consensus weight
+  eta2: 1.0 # Conflict weight
+  lr: 0.01 # Learning rate
+  epochs: 15 # Number of epochs
+  momentum: 0.9
+  weight_decay: 5e-4
+  
+  # Legacy/Unused
+  epsilon: 0.0 # Unused
+  alpha: 0.0 # Unused
+  projection_dim: 4096 
+  activation: "gelu"
+  init_scale: 1.0
+  init_method: "gaussian"
+  scales: [1.0]
+  adapter_depth: 2
+  solver_device: "cpu"
+  use_feature_distillation: true
+  low_rank_dim: 0
+  num_boosting_stages: 10
