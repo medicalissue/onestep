@@ -12,37 +12,31 @@ wandb:
   mode: "online" # or "disabled" for debugging
 
 data:
-  batch_size: 128
+  batch_size: 64
   num_workers: 4
-  dataset_name: "cifar10" # or "cifar10", etc.
-  input_dim: 3*32*32 # for synthetic data
+  dataset_name: cifar100 # or "cifar10", etc.
+  input_dim: 3*32*32 # for synthetic data:
   num_samples: 10000 # for synthetic data
 
 model:
+  teacher_path: /data/cifar100/resnet56_cifar100.pth # Placeholder path
+  teacher_name: resnet56
+  student_name: resnet20
   teacher_hidden_dim: 256
   student_hidden_dim: 128
-  output_dim: 10 # Number of classes or output features
+  output_dim: 100 # Number of classes or output features
 
 distill:
+  method: kd
+  gamma_fn: tanh
+  solver_device: "cuda"
+  epochs: 240
+  lr: 0.05
+  momentum: 0.9
+  weight_decay: 5e-4
+  temperature: 4.0
+  alpha: 1.0
   # PRISM Hyperparameters
   beta: 1.0 # Entropy sensitivity
   eta1: 1.0 # Consensus weight
   eta2: 1.0 # Conflict weight
-  lr: 0.01 # Learning rate
-  epochs: 15 # Number of epochs
-  momentum: 0.9
-  weight_decay: 5e-4
-  
-  # Legacy/Unused
-  epsilon: 0.0 # Unused
-  alpha: 0.0 # Unused
-  projection_dim: 4096 
-  activation: "gelu"
-  init_scale: 1.0
-  init_method: "gaussian"
-  scales: [1.0]
-  adapter_depth: 2
-  solver_device: "cpu"
-  use_feature_distillation: true
-  low_rank_dim: 0
-  num_boosting_stages: 10

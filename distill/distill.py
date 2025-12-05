@@ -51,7 +51,7 @@ def main(cfg: DictConfig):
     # 3. Setup Models
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    if hasattr(cfg.distill, 'teacher_path') and cfg.distill.teacher_path:
+    if hasattr(cfg.distill, 'teacher_path') and cfg.distill.teacher_path and cfg.distill.teacher_path != "None":
         log.info(f"Loading Teacher from local path: {cfg.distill.teacher_path}...")
         # Initialize with pretrained=False since we load custom weights
         teacher = ResNetWrapper(num_classes=10, pretrained=False).to(device)
@@ -103,7 +103,6 @@ def main(cfg: DictConfig):
                 
                 # Soft Correctness (Alpha)
                 # alpha = p_target (Probability assigned to GT class)
-                # Gather probabilities of target classes
                 alpha_per_sample = t_probs.gather(1, targets.view(-1, 1)).squeeze()
                 alpha_batch = alpha_per_sample.mean().item()
                 
@@ -123,50 +122,58 @@ def main(cfg: DictConfig):
             optimizer.zero_grad()
             loss_kl.backward(retain_graph=True)
             
+            # 4. PRISM-E Logic (Layer-wise Elastic & Correctness-Aware)
+            
+            # Metrics for logging
+            total_gamma = 0.0
+            total_cos = 0.0
+            # Store Soft Gradients (Layer-wise)
             grad_s = {}
             for name, param in student.named_parameters():
                 if param.grad is not None:
                     grad_s[name] = param.grad.clone()
-                    param.grad = None 
+            
+            optimizer.zero_grad() # Clear for hard backward
             
             # 3. Compute Hard Gradient (g_h)
             loss_ce = F.cross_entropy(s_logits, targets)
             loss_ce.backward()
             
-            # 4. Gradient Projection & Combination (PRISM-D)
+            num_params = 0
+            
             for name, param in student.named_parameters():
                 if param.grad is not None and name in grad_s:
-                    g_h = param.grad 
+                    g_h = param.grad
                     g_s = grad_s[name]
                     
+                    # Layer-wise Cosine Similarity
+                    # We flatten only the current parameter tensor, not the whole model
                     g_h_flat = g_h.view(-1)
                     g_s_flat = g_s.view(-1)
                     
-                    # Unit Vector Projection (Stability)
                     norm_s = torch.norm(g_s_flat)
-                    g_s_hat = g_s_flat / (norm_s + 1e-8)
+                    norm_h = torch.norm(g_h_flat)
                     
-                    dot = torch.dot(g_h_flat, g_s_hat)
-                    proj = dot * g_s_hat
-                    proj = proj.view_as(g_h)
-                    
-                    # PRISM-D Update Rule
-                    # g_final = alpha * g_s + g_h - (alpha if dot < 0 else 0) * proj
-                    
-                    # 1. Base: Scaled Soft Gradient
-                    g_final = alpha_batch * g_s
-                    
-                    # 2. Hard Gradient Component
-                    if dot >= 0:
-                        # Synergy: Trust Hard Gradient fully
-                        g_final += g_h
+                    if norm_s > 1e-8 and norm_h > 1e-8:
+                        cos_phi = torch.dot(g_s_flat, g_h_flat) / (norm_s * norm_h)
                     else:
-                        # Conflict: Remove conflicting component based on correctness
-                        # If alpha=1 (Trust Teacher): Remove proj (g_h_perp)
-                        # If alpha=0 (Trust Hard): Keep proj (g_h)
-                        g_final += g_h - alpha_batch * proj
+                        cos_phi = torch.tensor(0.0, device=g_s.device)
+                    
+                    # Elastic Scale Factor (Gamma)
+                    # gamma = 1 + alpha * tanh(cos_phi)
+                    gamma = 1.0 + alpha_batch * torch.tanh(cos_phi)
+                    gamma = torch.clamp(gamma, min=0.1)
+                    
+                    # PRISM-E Update Rule
+                    # g_final = alpha * g_s + gamma * g_h
+                    g_final = alpha_batch * g_s + gamma * g_h
                     
                     param.grad = g_final
+                    
+                    # Accumulate metrics
+                    total_gamma += gamma.item()
+                    total_cos += cos_phi.item()
+                    num_params += 1
             
             optimizer.step()
             
@@ -178,7 +185,9 @@ def main(cfg: DictConfig):
             correct += predicted.eq(targets).sum().item()
             
             if i % 100 == 0:
-                log.info(f"Epoch [{epoch+1}/{epochs}] Batch [{i}] Loss: {loss_ce.item():.4f} Acc: {100.*correct/total:.2f}% Alpha(Soft): {alpha_batch:.4f} Entropy: {avg_entropy:.4f}")
+                avg_gamma = total_gamma / num_params if num_params > 0 else 0.0
+                avg_cos = total_cos / num_params if num_params > 0 else 0.0
+                log.info(f"Epoch [{epoch+1}/{epochs}] Batch [{i}] Loss: {loss_ce.item():.4f} Acc: {100.*correct/total:.2f}% Alpha(Soft): {alpha_batch:.4f} Gamma: {avg_gamma:.4f} Cos: {avg_cos:.4f}")
         
         scheduler.step()
         
