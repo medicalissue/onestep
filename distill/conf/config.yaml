@@ -19,7 +19,7 @@ data:
   num_samples: 10000 # for synthetic data
 
 model:
-  teacher_path: /data/cifar100/resnet56_cifar100.pth # Placeholder path
+  teacher_path: /home/junesang/distill/cifar100_resnet56-f2eff4c8.pt
   teacher_name: resnet56
   student_name: resnet20
   teacher_hidden_dim: 256
@@ -37,8 +37,6 @@ distill:
   weight_decay: 5e-4
   temperature: 4.0
   alpha: 1.0
-  # PRISM Hyperparameters
-  prism_lambda: 1.0 # Scaling factor for Sigmoidal Gating
-  beta: 1.0 # Entropy sensitivity
-  eta1: 1.0 # Consensus weight
-  eta2: 1.0 # Conflict weight
+  # 2D PRISM Hyperparameters
+  var_ema_decay: 0.99 # EMA decay for variance estimation
+  dir_ema_decay: 0.9 # EMA decay for direction estimation
