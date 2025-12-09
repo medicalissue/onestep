@@ -14,7 +14,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 
 # Import ResNet20 from the existing codebase
-from distill.models_cifar import resnet20
+from models import resnet20
 
 # Setup logging
 logging.basicConfig(
@@ -42,7 +42,30 @@ def temperature_transform(probs, tau):
     scaled_logits = log_probs / tau
     return F.softmax(scaled_logits, dim=1)
 
-def la_e_rls_loss(logits, targets, cfg, device):
+class LossEMA:
+    def __init__(self, decay=0.99):
+        self.decay = decay
+        self.min_loss = torch.tensor(0.0)
+        self.max_loss = torch.tensor(5.0) # Initial guess
+        self.initialized = False
+        
+    def update(self, loss_batch):
+        with torch.no_grad():
+            batch_min = loss_batch.min()
+            batch_max = loss_batch.max()
+            
+            if not self.initialized:
+                self.min_loss = batch_min
+                self.max_loss = batch_max
+                self.initialized = True
+            else:
+                self.min_loss = self.decay * self.min_loss + (1 - self.decay) * batch_min
+                self.max_loss = self.decay * self.max_loss + (1 - self.decay) * batch_max
+
+    def get_range(self):
+        return self.min_loss, self.max_loss
+
+def la_e_rls_loss(logits, targets, cfg, device, loss_ema, current_lambda):
     """
     Compute the LA-E-RLS loss.
     """
@@ -51,24 +74,47 @@ def la_e_rls_loss(logits, targets, cfg, device):
     # 1. Hard CE Loss & Difficulty Estimation
     ce_loss_per_sample = F.cross_entropy(logits, targets, reduction='none')
     
+    # Update EMA
+    loss_ema.update(ce_loss_per_sample.cpu())
+    l_min, l_max = loss_ema.get_range()
+    l_min = l_min.to(device)
+    l_max = l_max.to(device)
+    
     with torch.no_grad():
-        l_min = ce_loss_per_sample.min()
-        l_max = ce_loss_per_sample.max()
+        # Difficulty score d_i (Version B: Entropy-based)
+        # s_{i,y} = exp(-ell_i)
+        s_iy = torch.exp(-ce_loss_per_sample)
         
-        # Difficulty score d_i in [0, 1]
-        denom = l_max - l_min + 1e-8
-        d_i = torch.clamp((ce_loss_per_sample - l_min) / denom, 0.0, 1.0)
+        # Avoid numerical instability for log(1-s_iy) when s_iy is close to 1
+        # 1 - s_iy could be 0.
+        one_minus_s = 1.0 - s_iy
+        one_minus_s = torch.clamp(one_minus_s, min=1e-8)
+        
+        # H_tilde = -s_iy * log(s_iy) - (1-s_iy) * log((1-s_iy)/(C-1))
+        # Note: log(s_iy) = -ce_loss_per_sample
+        term1 = s_iy * ce_loss_per_sample
+        term2 = one_minus_s * (torch.log(one_minus_s) - math.log(C - 1))
+        
+        h_tilde = term1 - term2
+        
+        # d_i = H_tilde / log(C)
+        d_i = h_tilde / math.log(C)
+        d_i = torch.clamp(d_i, 0.0, 1.0)
         
         # 2. Target Entropy
         h_target = cfg.la_e_rls.h_min + (cfg.la_e_rls.h_max - cfg.la_e_rls.h_min) * d_i
         
         # 3. Base RLS Distribution p_i
-        alpha = torch.empty(B, device=device).uniform_(cfg.la_e_rls.alpha_min, cfg.la_e_rls.alpha_max)
+        # Adaptive alpha based on difficulty (Version C)
+        # alpha_i = alpha_min + (alpha_max - alpha_min) * d_i
+        alpha = cfg.la_e_rls.alpha_min + (cfg.la_e_rls.alpha_max - cfg.la_e_rls.alpha_min) * d_i
         
         p_i = torch.zeros(B, C, device=device)
         p_i.scatter_(1, targets.view(-1, 1), (1 - alpha).view(-1, 1))
         
-        r = torch.rand(B, C, device=device)
+        # Use Power-law noise to create Long-tail (Sparse) distribution
+        # r ~ Uniform(0, 1)^k -> pushes most values towards 0, leaving few high values
+        r = torch.rand(B, C, device=device).pow(cfg.la_e_rls.power_law_exp)
         r.scatter_(1, targets.view(-1, 1), 0.0)
         
         r_sum = r.sum(dim=1, keepdim=True) + 1e-8
@@ -95,14 +141,37 @@ def la_e_rls_loss(logits, targets, cfg, device):
         tau_star = (tau_min + tau_max) / 2.0
         q_star = temperature_transform(p_i, tau_star.view(-1, 1))
         
-    # 5. Soft KL Loss
-    s_logits_tau = logits / cfg.la_e_rls.tau_s
-    s_log_probs = F.log_softmax(s_logits_tau, dim=1)
+    # 5. Soft KL Loss (Permutation Invariant / Sorted KL)
+    # Virtual Teacher Logits (z_t) that satisfy the target entropy
+    # z_t = log(p_i) / tau_star
+    log_p_i = torch.log(p_i + 1e-10)
+    z_t = log_p_i / tau_star.view(-1, 1)
     
-    kl_loss = F.kl_div(s_log_probs, q_star, reduction='batchmean') * (cfg.la_e_rls.tau_s ** 2)
+    # Distillation with fixed KD temperature (tau_kd)
+    tau_kd = cfg.la_e_rls.tau_kd
+    
+    # Teacher target: q_distill
+    total_tau = tau_star.view(-1, 1) * tau_kd
+    q_distill = temperature_transform(p_i, total_tau)
+    
+    # Student output
+    s_logits_tau = logits / tau_kd
+    s_probs = F.softmax(s_logits_tau, dim=1)
+    
+    # SORTING for Permutation Invariant KL
+    # We match the "Shape" of the distribution, allowing the student to decide "Which" classes to fill the shape.
+    # This reconciles "Random Noise" with "Dark Knowledge".
+    q_distill_sorted, _ = torch.sort(q_distill, dim=1, descending=True)
+    s_probs_sorted, _ = torch.sort(s_probs, dim=1, descending=True)
+    
+    s_log_probs_sorted = torch.log(s_probs_sorted + 1e-10)
+    
+    # KL(q_distill_sorted || s_sorted)
+    # Scale by tau_kd^2
+    kl_loss = F.kl_div(s_log_probs_sorted, q_distill_sorted, reduction='batchmean') * (tau_kd ** 2)
     
     ce_loss = ce_loss_per_sample.mean()
-    total_loss = (1 - cfg.la_e_rls.lambda_val) * ce_loss + cfg.la_e_rls.lambda_val * kl_loss
+    total_loss = (1 - current_lambda) * ce_loss + current_lambda * kl_loss
     
     return total_loss, ce_loss, kl_loss, d_i.mean(), h_target.mean(), tau_star.mean()
 
@@ -136,12 +205,20 @@ def main(cfg: DictConfig):
     net = resnet20(num_classes=100).to(device)
     
     optimizer = optim.SGD(net.parameters(), lr=cfg.train.lr, momentum=cfg.train.momentum, weight_decay=cfg.train.weight_decay)
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[100, 150], gamma=0.1)
+    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[150, 180, 210], gamma=0.1)
     
     logger.info("Starting Training...")
     start_time = time.time()
     
+    loss_ema = LossEMA()
+    
     for epoch in range(cfg.train.epochs):
+        # Cosine Increasing Schedule for Lambda
+        # lambda(t) = lambda_max * sin^2(pi/2 * t / T)
+        lambda_max = cfg.la_e_rls.lambda_val
+        progress = epoch / cfg.train.epochs
+        current_lambda = lambda_max * (math.sin(math.pi / 2 * progress) ** 2)
+        
         net.train()
         train_loss = 0
         train_ce = 0
@@ -162,7 +239,7 @@ def main(cfg: DictConfig):
             optimizer.zero_grad()
             logits = net(inputs)
             
-            loss, ce, kl, d_mean, h_mean, tau_mean = la_e_rls_loss(logits, targets, cfg, device)
+            loss, ce, kl, d_mean, h_mean, tau_mean = la_e_rls_loss(logits, targets, cfg, device, loss_ema, current_lambda)
             
             loss.backward()
             optimizer.step()
