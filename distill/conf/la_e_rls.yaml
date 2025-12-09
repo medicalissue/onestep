@@ -25,13 +25,13 @@ train:
   
 la_e_rls:
   alpha_min: 0.02
-  alpha_max: 0.15
-  h_min: 0.1
-  h_max: 4.5
+  alpha_max: 0.12
+  h_min: 0.5
+  h_max: 2.5
   tau_min: 0.5
-  tau_max: 100.0
+  tau_max: 5.0
   lambda_val: 0.5
-  tau_kd: 1.0
+  tau_kd: 4.0
   power_law_exp: 3.0
-  bs_iters: 10
+  bs_iters: 15
   dry_run: false
