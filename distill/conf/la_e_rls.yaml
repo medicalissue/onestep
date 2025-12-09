@@ -1,0 +1,36 @@
+hydra:
+  run:
+    dir: outputs/la_e_rls/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+wandb:
+  project: "one-pass-distill"
+  entity: null
+  name: "LA-E-RLS_${now:%Y-%m-%d_%H-%M-%S}"
+  mode: "online"
+
+data:
+  batch_size: 128
+  num_workers: 4
+  dataset_name: cifar100
+
+model:
+  name: resnet20
+  num_classes: 100
+
+train:
+  epochs: 200
+  lr: 0.1
+  momentum: 0.9
+  weight_decay: 5e-4
+  
+la_e_rls:
+  alpha_min: 0.1
+  alpha_max: 0.5
+  h_min: 0.1
+  h_max: 4.6
+  tau_min: 0.2
+  tau_max: 5.0
+  lambda_val: 0.5
+  tau_s: 1.0
+  bs_iters: 10
+  dry_run: false
