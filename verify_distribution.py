@@ -12,14 +12,14 @@ def temperature_transform(p, tau):
 
 def verify():
     # Config parameters
-    h_min = 0.5
-    h_max = 1.5
-    alpha_min = 0.05
-    alpha_max = 0.30
+    h_min = 0.1
+    h_max = 2.5
+    alpha_min = 0.02
+    alpha_max = 0.15
     tau_min_val = 0.5
-    tau_max_val = 3.0
-    power_law_exp = 5.0
-    tau_kd = 1.0
+    tau_max_val = 100.0
+    power_law_exp = 3.0
+    tau_kd = 4.0
     bs_iters = 10
     
     B = 5
@@ -66,35 +66,66 @@ def verify():
     r_norm = r / r_sum
     p_i += r_norm * alpha.view(-1, 1)
     
-    # Binary Search for Tau*
+    # Hybrid Secant/Bisection Method (Brent's Method approximation)
     tau_min = torch.full((B,), tau_min_val)
     tau_max = torch.full((B,), tau_max_val)
+    tau = (tau_min + tau_max) / 2.0
+    z = torch.log(p_i + 1e-10)
     
     for _ in range(bs_iters):
-        tau_mid = (tau_min + tau_max) / 2.0
-        tau_mid_expanded = tau_mid.view(-1, 1)
-        q_mid = temperature_transform(p_i, tau_mid_expanded)
-        h_cur = entropy(q_mid)
-        mask_too_soft = h_cur > h_target
-        tau_max = torch.where(mask_too_soft, tau_mid, tau_max)
-        tau_min = torch.where(~mask_too_soft, tau_mid, tau_min)
+        tau_expanded = tau.view(-1, 1)
+        logits_scaled = z / tau_expanded
+        q = F.softmax(logits_scaled, dim=1)
+        h_cur = entropy(q)
+        diff = h_cur - h_target
         
-    tau_star = (tau_min + tau_max) / 2.0
+        # Update Bracket
+        mask_too_soft = diff > 0
+        tau_max = torch.where(mask_too_soft, tau, tau_max)
+        tau_min = torch.where(~mask_too_soft, tau, tau_min)
+        
+        # Gradient
+        E_z = (q * z).sum(dim=1)
+        E_z2 = (q * z.pow(2)).sum(dim=1)
+        var_z = E_z2 - E_z.pow(2)
+        dH_dtau = var_z / (tau.pow(3) + 1e-10)
+        
+        # Secant Step
+        update = diff / (dH_dtau + 1e-10)
+        tau_secant = tau - update
+        
+        # Check Validity
+        buffer = (tau_max - tau_min) * 0.1
+        is_secant_valid = (tau_secant > tau_min + buffer) & (tau_secant < tau_max - buffer)
+        
+        # Fallback
+        tau_bisection = (tau_min + tau_max) / 2.0
+        
+        tau = torch.where(is_secant_valid, tau_secant, tau_bisection)
+        
+    tau_star = tau
     
     # Virtual Teacher & Distillation
+    # Teacher Target: q = softmax(z_base / tau*) -> Matches H_target
+    # Student: p = softmax(z_s / tau_kd)
+    # We want p -> q
+    
     log_p_i = torch.log(p_i + 1e-10)
     z_t = log_p_i / tau_star.view(-1, 1)
+    # Teacher target: q_distill
     total_tau = tau_star.view(-1, 1) * tau_kd
     q_distill = temperature_transform(p_i, total_tau)
     
-    print(f"{'Diff':<6} | {'H_tgt':<6} | {'Tau*':<6} | {'Top-5 Probs (q_distill)'}")
-    print("-" * 60)
+    print(f"{'Diff':<6} | {'H_tgt':<6} | {'Tau*':<6} | {'H_actual':<8} | {'Top-5 Probs (q_distill)'}")
+    print("-" * 75)
     
     for i in range(B):
-        probs, _ = torch.sort(q_distill[i], descending=True)
-        top5 = probs[:5].tolist()
-        top5_str = ", ".join([f"{p:.4f}" for p in top5])
-        print(f"{d_i[i]:.4f} | {h_target[i]:.4f} | {tau_star[i]:.4f} | [{top5_str}]")
+        probs = q_distill[i]
+        top5_probs, _ = torch.topk(probs, 5)
+        top5_list = top5_probs.tolist()
+        h_act = entropy(probs.unsqueeze(0)).item()
+        
+        print(f"{d_i[i].item():.4f} | {h_target[i].item():.4f} | {tau_star[i].item():.4f} | {h_act:.4f}   | {['{:.4f}'.format(p) for p in top5_list]}")
 
 if __name__ == "__main__":
     verify()

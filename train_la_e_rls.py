@@ -122,33 +122,67 @@ def la_e_rls_loss(logits, targets, cfg, device, loss_ema, current_lambda):
         
         p_i += r_norm * alpha.view(-1, 1)
         
-        # 4. Binary Search for Tau*
+        # 4. Hybrid Secant/Bisection Method (Brent's Method approximation)
+        # Combines robustness of Bisection with speed of Newton/Secant.
+        
         tau_min = torch.full((B,), cfg.la_e_rls.tau_min, device=device)
         tau_max = torch.full((B,), cfg.la_e_rls.tau_max, device=device)
+        tau = (tau_min + tau_max) / 2.0
+        
+        # Logits for gradient calculation
+        z = torch.log(p_i + 1e-10)
         
         for _ in range(cfg.la_e_rls.bs_iters):
-            tau_mid = (tau_min + tau_max) / 2.0
-            tau_mid_expanded = tau_mid.view(-1, 1)
+            tau_expanded = tau.view(-1, 1)
             
-            q_mid = temperature_transform(p_i, tau_mid_expanded)
-            h_cur = entropy(q_mid)
+            # Forward
+            logits_scaled = z / tau_expanded
+            q = F.softmax(logits_scaled, dim=1)
+            h_cur = entropy(q)
+            diff = h_cur - h_target
             
-            mask_too_soft = h_cur > h_target
+            # Update Bracket (Bisection Logic)
+            # If H > H_target (Too flat) -> Need smaller Tau -> High = Tau
+            # If H < H_target (Too sharp) -> Need larger Tau -> Low = Tau
+            # Note: H is monotonically increasing with Tau.
+            mask_too_soft = diff > 0
+            tau_max = torch.where(mask_too_soft, tau, tau_max)
+            tau_min = torch.where(~mask_too_soft, tau, tau_min)
             
-            tau_max = torch.where(mask_too_soft, tau_mid, tau_max)
-            tau_min = torch.where(~mask_too_soft, tau_mid, tau_min)
+            # Gradient Calculation (for Secant/Newton step)
+            E_z = (q * z).sum(dim=1)
+            E_z2 = (q * z.pow(2)).sum(dim=1)
+            var_z = E_z2 - E_z.pow(2)
+            dH_dtau = var_z / (tau.pow(3) + 1e-10)
             
-        tau_star = (tau_min + tau_max) / 2.0
+            # Secant/Newton Step
+            # tau_new = tau - diff / H'
+            update = diff / (dH_dtau + 1e-10)
+            tau_secant = tau - update
+            
+            # Check Validity of Secant Step
+            # Must be strictly within the CURRENT bracket [tau_min, tau_max]
+            # We add a small buffer to avoid getting stuck at edges
+            buffer = (tau_max - tau_min) * 0.1
+            is_secant_valid = (tau_secant > tau_min + buffer) & (tau_secant < tau_max - buffer)
+            
+            # Fallback to Bisection
+            tau_bisection = (tau_min + tau_max) / 2.0
+            
+            # Select Next Tau
+            tau = torch.where(is_secant_valid, tau_secant, tau_bisection)
+            
+        tau_star = tau
+        
+        # Virtual Teacher Logits
+        # z_t = log(p_i) / tau_star
+        log_p_i = torch.log(p_i + 1e-10)
+        tau_kd = cfg.la_e_rls.tau_kd # Moved here to be available for z_t calculation
+        z_t = log_p_i / (tau_star.view(-1, 1) * tau_kd)
         q_star = temperature_transform(p_i, tau_star.view(-1, 1))
         
     # 5. Soft KL Loss (Permutation Invariant / Sorted KL)
-    # Virtual Teacher Logits (z_t) that satisfy the target entropy
-    # z_t = log(p_i) / tau_star
-    log_p_i = torch.log(p_i + 1e-10)
-    z_t = log_p_i / tau_star.view(-1, 1)
-    
     # Distillation with fixed KD temperature (tau_kd)
-    tau_kd = cfg.la_e_rls.tau_kd
     
     # Teacher target: q_distill
     total_tau = tau_star.view(-1, 1) * tau_kd
