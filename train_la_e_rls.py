@@ -188,26 +188,85 @@ def la_e_rls_loss(logits, targets, cfg, device, loss_ema, current_lambda):
     total_tau = tau_star.view(-1, 1) * tau_kd
     q_distill = temperature_transform(p_i, total_tau)
     
-    # Student output
-    s_logits_tau = logits / tau_kd
-    s_probs = F.softmax(s_logits_tau, dim=1)
+    # Student prediction: p_s
+    # logits are raw logits, so we apply temperature scaling directly
+    p_s = F.softmax(logits / tau_kd, dim=1)
     
-    # SORTING for Permutation Invariant KL
-    # We match the "Shape" of the distribution, allowing the student to decide "Which" classes to fill the shape.
-    # This reconciles "Random Noise" with "Dark Knowledge".
-    q_distill_sorted, _ = torch.sort(q_distill, dim=1, descending=True)
-    s_probs_sorted, _ = torch.sort(s_probs, dim=1, descending=True)
+    sorting_mode = cfg.la_e_rls.get("sorting_mode", "fully_sorted")
     
-    s_log_probs_sorted = torch.log(s_probs_sorted + 1e-10)
+    if sorting_mode == "gt_anchored":
+        # GT-Anchored Sorted KL (Correct Implementation)
+        # Goal: Incentive Student GT to be the Max, matching Teacher's Max.
+        # Teacher: Fully Sorted (Index 0 is Max).
+        # Student: Anchor GT at Index 0, Sort Rest at Index 1..
+        
+        # 1. Teacher Side: Just Sort (Permutation Invariant)
+        # q[0] will be the Maximum probability (which is effectively the Target prob in our generation logic)
+        q_distill_sorted, _ = torch.sort(q_distill, descending=True, dim=1)
+        
+        # 2. Student Side: Anchor GT
+        
+        # A. Extract GT prob
+        target_indices = targets.view(-1, 1)
+        p_s_gt = p_s.gather(1, target_indices) # (B, 1)
+        
+        # B. Sort Rest
+        # Clone to avoid modifying original
+        p_s_temp = p_s.clone()
+        # Set GT to -1.0 (so it moves to the end after sort)
+        p_s_temp.scatter_(1, target_indices, -1.0)
+        # Sort descending
+        p_s_sorted_all, _ = torch.sort(p_s_temp, descending=True, dim=1)
+        # Slice off the last column (the GT we set to -1.0)
+        p_s_non_gt_sorted = p_s_sorted_all[:, :-1]
+        
+        # C. Concat: [GT, Sorted_Rest]
+        # Now Index 0 is GT. Index 1.. are sorted non-GT.
+        p_s_sorted = torch.cat([p_s_gt, p_s_non_gt_sorted], dim=1)
+        
+        # Result:
+        # KL( p_s_sorted || q_distill_sorted )
+        # p_s_sorted[0] (GT) <-> q_distill_sorted[0] (Max)
+        # p_s_sorted[1..] (Rest) <-> q_distill_sorted[1..] (Rest)
+        
+    else:
+        # Fully Sorted KL (Original)
+        p_s_sorted, _ = torch.sort(p_s, descending=True, dim=1)
+        q_distill_sorted, _ = torch.sort(q_distill, descending=True, dim=1)
+        
+        if torch.isnan(p_s_sorted).any() or torch.isnan(q_distill_sorted).any():
+            print("NaN detected in sorted probs!")
+            print("p_s_sorted:", p_s_sorted)
+            print("q_distill_sorted:", q_distill_sorted)
+        
+
     
-    # KL(q_distill_sorted || s_sorted)
+    # KL Divergence
+    # Add epsilon to avoid log(0)
+    kl_loss = F.kl_div((p_s_sorted + 1e-10).log(), q_distill_sorted, reduction='batchmean')
+    
     # Scale by tau_kd^2
-    kl_loss = F.kl_div(s_log_probs_sorted, q_distill_sorted, reduction='batchmean') * (tau_kd ** 2)
+    kl_loss = kl_loss * (tau_kd ** 2)
+    
+    # Adaptive Lambda Schedule
+    lambda_schedule = cfg.la_e_rls.get("lambda_schedule", "cosine")
+    
+    if lambda_schedule == "adaptive":
+        # Adaptive: Lambda is proportional to mastery (1 - difficulty)
+        # Mastery increases -> Lambda increases (More regularization)
+        # Difficulty increases -> Lambda decreases (More focus on CE)
+        batch_mastery = 1.0 - d_i.mean()
+        # Clamp mastery to [0, 1] just in case
+        batch_mastery = torch.clamp(batch_mastery, 0.0, 1.0)
+        
+        current_lambda = cfg.la_e_rls.lambda_val * batch_mastery
+    
+    # If lambda_schedule is "cosine", current_lambda is passed from outside
     
     ce_loss = ce_loss_per_sample.mean()
     total_loss = (1 - current_lambda) * ce_loss + current_lambda * kl_loss
     
-    return total_loss, ce_loss, kl_loss, d_i.mean(), h_target.mean(), tau_star.mean()
+    return total_loss, ce_loss, kl_loss, d_i.mean(), h_target.mean(), tau_star.mean(), current_lambda
 
 @hydra.main(version_base=None, config_path="distill/conf", config_name="la_e_rls")
 def main(cfg: DictConfig):
@@ -273,7 +332,7 @@ def main(cfg: DictConfig):
             optimizer.zero_grad()
             logits = net(inputs)
             
-            loss, ce, kl, d_mean, h_mean, tau_mean = la_e_rls_loss(logits, targets, cfg, device, loss_ema, current_lambda)
+            loss, ce, kl, d_mean, h_mean, tau_mean, lambda_used = la_e_rls_loss(logits, targets, cfg, device, loss_ema, current_lambda)
             
             loss.backward()
             optimizer.step()
