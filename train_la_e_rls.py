@@ -112,9 +112,27 @@ def la_e_rls_loss(logits, targets, cfg, device, loss_ema, current_lambda):
         p_i = torch.zeros(B, C, device=device)
         p_i.scatter_(1, targets.view(-1, 1), (1 - alpha).view(-1, 1))
         
-        # Use Power-law noise to create Long-tail (Sparse) distribution
-        # r ~ Uniform(0, 1)^k -> pushes most values towards 0, leaving few high values
-        r = torch.rand(B, C, device=device).pow(cfg.la_e_rls.power_law_exp)
+        distribution_type = cfg.la_e_rls.get("distribution_type", "power_law")
+        
+        if distribution_type == "dirichlet":
+            # Dirichlet Distribution (The "Sexy" Option)
+            # Sample from symmetric Dirichlet with concentration beta
+            beta_val = cfg.la_e_rls.get("dirichlet_beta", 0.0)
+            
+            # Auto-scaling: If beta <= 0, set to 1/C to maintain constant sparsity
+            if beta_val <= 0:
+                beta_val = 1.0 / C
+            
+            # Create concentration tensor (B, C)
+            concentration = torch.full((B, C), beta_val, device=device)
+            m = torch.distributions.Dirichlet(concentration)
+            r = m.sample()
+        else:
+            # Power-law noise (Original)
+            # r ~ Uniform(0, 1)^k -> pushes most values towards 0, leaving few high values
+            r = torch.rand(B, C, device=device).pow(cfg.la_e_rls.power_law_exp)
+
+        # Zero out the target index in the noise term so we can explicitly control GT prob with alpha
         r.scatter_(1, targets.view(-1, 1), 0.0)
         
         r_sum = r.sum(dim=1, keepdim=True) + 1e-8

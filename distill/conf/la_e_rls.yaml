@@ -21,7 +21,7 @@ train:
   epochs: 240
   lr: 0.05
   momentum: 0.9
-  weight_decay: 5e-4
+  weight_decay: 0.0001
   
 la_e_rls:
   alpha_min: 0.02
@@ -32,7 +32,9 @@ la_e_rls:
   tau_max: 5.0
   lambda_val: 0.5
   tau_kd: 4.0
-  power_law_exp: 4.0
+  power_law_exp: 2.0
+  distribution_type: "dirichlet" # Options: "power_law", "dirichlet"
+  dirichlet_beta: 0.0 # 0.0 or negative -> Auto 1/C (Ideal for sparsity)
   bs_iters: 15
   seed: 42
   sorting_mode: "fully_sorted" # Options: "fully_sorted", "gt_anchored"
