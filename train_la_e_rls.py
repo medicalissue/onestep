@@ -81,24 +81,13 @@ def la_e_rls_loss(logits, targets, cfg, device, loss_ema, current_lambda):
     l_max = l_max.to(device)
     
     with torch.no_grad():
-        # Difficulty score d_i (Version B: Entropy-based)
-        # s_{i,y} = exp(-ell_i)
-        s_iy = torch.exp(-ce_loss_per_sample)
+        # Difficulty score d_i (Relative using EMA)
+        # Use EMA min/max to normalize difficulty relative to current training stage.
+        # This prevents late-stage regularization collapse.
+        # Even if absolute loss is small, the hardest samples in that stage will get d_i=1.0.
         
-        # Avoid numerical instability for log(1-s_iy) when s_iy is close to 1
-        # 1 - s_iy could be 0.
-        one_minus_s = 1.0 - s_iy
-        one_minus_s = torch.clamp(one_minus_s, min=1e-8)
-        
-        # H_tilde = -s_iy * log(s_iy) - (1-s_iy) * log((1-s_iy)/(C-1))
-        # Note: log(s_iy) = -ce_loss_per_sample
-        term1 = s_iy * ce_loss_per_sample
-        term2 = one_minus_s * (torch.log(one_minus_s) - math.log(C - 1))
-        
-        h_tilde = term1 - term2
-        
-        # d_i = H_tilde / log(C)
-        d_i = h_tilde / math.log(C)
+        # d_i = (loss - min) / (max - min)
+        d_i = (ce_loss_per_sample - l_min) / (l_max - l_min + 1e-8)
         d_i = torch.clamp(d_i, 0.0, 1.0)
         
         # 2. Target Entropy
