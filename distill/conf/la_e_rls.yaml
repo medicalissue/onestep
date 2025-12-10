@@ -41,4 +41,6 @@ la_e_rls:
   seed: 42
   sorting_mode: "fully_sorted" # Options: "fully_sorted", "gt_anchored"
   lambda_schedule: "adaptive" # Options: "cosine", "adaptive"
+  ema_decay: 0.99 # Decay rate for LossEMA
   dry_run: false
+  

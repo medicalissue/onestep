@@ -320,7 +320,7 @@ def main(cfg: DictConfig):
     logger.info("Starting Training...")
     start_time = time.time()
     
-    loss_ema = LossEMA()
+    loss_ema = LossEMA(decay=cfg.la_e_rls.get("ema_decay", 0.99))
     
     for epoch in range(cfg.train.epochs):
         # Cosine Increasing Schedule for Lambda
