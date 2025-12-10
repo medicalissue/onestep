@@ -102,7 +102,17 @@ def la_e_rls_loss(logits, targets, cfg, device, loss_ema, current_lambda):
         d_i = torch.clamp(d_i, 0.0, 1.0)
         
         # 2. Target Entropy
-        h_target = cfg.la_e_rls.h_min + (cfg.la_e_rls.h_max - cfg.la_e_rls.h_min) * d_i
+        max_entropy = math.log(C)
+        
+        h_min = cfg.la_e_rls.h_min
+        if cfg.la_e_rls.get("h_min_ratio", 0) > 0:
+             h_min = cfg.la_e_rls.h_min_ratio * max_entropy
+             
+        h_max = cfg.la_e_rls.h_max
+        if cfg.la_e_rls.get("h_max_ratio", 0) > 0:
+             h_max = cfg.la_e_rls.h_max_ratio * max_entropy
+
+        h_target = h_min + (h_max - h_min) * d_i
         
         # 3. Base RLS Distribution p_i
         # Adaptive alpha based on difficulty (Version C)
