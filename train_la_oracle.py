@@ -323,6 +323,11 @@ def la_oracle_loss(logits, features, targets, cfg, current_lambda, current_lr,
     include_momentum_in_lookahead = cfg.la_oracle.get("include_momentum_in_lookahead", False)
     momentum = cfg.train.momentum if include_momentum_in_lookahead else 0.0
     
+    # Enhancement E: KD-style temperature for gradient smoothing
+    # T > 1 makes gradients spread across all classes (reduces FKL tail-ignoring)
+    # Separate from τ* which handles entropy matching
+    kd_temperature = cfg.la_oracle.get("kd_temperature", 1.0)
+    
     # 1. Current probabilities
     probs = F.softmax(logits, dim=1)
     
@@ -357,10 +362,23 @@ def la_oracle_loss(logits, features, targets, cfg, current_lambda, current_lr,
             tau_min=tau_min, tau_max=tau_max, n_iters=bs_iters
         )
     
-    # 6. KL Loss per sample: KL(q* || p_θ)
-    log_probs = F.log_softmax(logits, dim=1)
-    # KL per sample: sum over classes
-    kl_per_sample = torch.sum(q_star * (torch.log(q_star + 1e-8) - log_probs), dim=1)  # (B,)
+    # 6. KL Loss with KD-style temperature smoothing
+    # τ* controls entropy matching (shape), T controls gradient smoothing
+    # Combined effective temperature: τ* × T
+    T = kd_temperature
+    tau_expanded = tau_star.view(-1, 1)  # (B, 1)
+    
+    if T != 1.0:
+        # Apply τ* for shape and T for gradient smoothing
+        # q_star_T = softmax(z_oracle / τ* / T) = softmax(z_oracle / (τ* × T))
+        q_star_T = F.softmax(z_oracle / tau_expanded / T, dim=1)
+        p_T = F.softmax(logits / T, dim=1)
+        # T² scaling to maintain gradient magnitude (standard KD)
+        kl_per_sample = T * T * torch.sum(q_star_T * (torch.log(q_star_T + 1e-8) - torch.log(p_T + 1e-8)), dim=1)
+    else:
+        # Standard KL without additional temperature (T=1), just τ*
+        log_probs = F.log_softmax(logits, dim=1)
+        kl_per_sample = torch.sum(q_star * (torch.log(q_star + 1e-8) - log_probs), dim=1)  # (B,)
     
     # Sample-adaptive λ based on BATCH-RELATIVE difficulty
     # Pure local oracle: only uses current batch statistics, no EMA

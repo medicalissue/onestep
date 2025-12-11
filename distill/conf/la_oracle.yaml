@@ -47,9 +47,20 @@ la_oracle:
   # ---------------------------------------------------------------------------
   # Temperature search (τ* for entropy matching)
   # ---------------------------------------------------------------------------
+  # τ* is found via bisection to match H(q*) = H*
+  # This controls the SHAPE of the oracle distribution
   tau_min: 0.1
   tau_max: 10.0
   bs_iters: 10
+  
+  # ---------------------------------------------------------------------------
+  # KD Temperature (T for gradient smoothing)
+  # ---------------------------------------------------------------------------
+  # T > 1 softens both q* and p before KL, spreading gradient across all classes
+  # This fixes FKL's "tail-ignoring" problem
+  # τ* controls entropy (shape), T controls gradient flow
+  # Uses T² scaling to maintain gradient magnitude (standard KD)
+  kd_temperature: 4.0  # Classic KD value
   
   # ---------------------------------------------------------------------------
   # [A] Sample Weighting (hard samples get stronger KL)
