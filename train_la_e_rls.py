@@ -42,30 +42,7 @@ def temperature_transform(probs, tau):
     scaled_logits = log_probs / tau
     return F.softmax(scaled_logits, dim=1)
 
-class LossEMA:
-    def __init__(self, decay=0.99):
-        self.decay = decay
-        self.min_loss = torch.tensor(0.0)
-        self.max_loss = torch.tensor(5.0) # Initial guess
-        self.initialized = False
-        
-    def update(self, loss_batch):
-        with torch.no_grad():
-            batch_min = loss_batch.min()
-            batch_max = loss_batch.max()
-            
-            if not self.initialized:
-                self.min_loss = batch_min
-                self.max_loss = batch_max
-                self.initialized = True
-            else:
-                self.min_loss = self.decay * self.min_loss + (1 - self.decay) * batch_min
-                self.max_loss = self.decay * self.max_loss + (1 - self.decay) * batch_max
-
-    def get_range(self):
-        return self.min_loss, self.max_loss
-
-def la_e_rls_loss(logits, targets, cfg, device, loss_ema, current_lambda):
+def la_e_rls_loss(logits, targets, cfg, device, current_lambda):
     """
     Compute the LA-E-RLS loss.
     """
@@ -74,70 +51,68 @@ def la_e_rls_loss(logits, targets, cfg, device, loss_ema, current_lambda):
     # 1. Hard CE Loss & Difficulty Estimation
     ce_loss_per_sample = F.cross_entropy(logits, targets, reduction='none')
     
-    # Update EMA
-    loss_ema.update(ce_loss_per_sample.cpu())
-    l_min, l_max = loss_ema.get_range()
-    l_min = l_min.to(device)
-    l_max = l_max.to(device)
-    
     with torch.no_grad():
-        # Difficulty score d_i (Relative using EMA)
-        # Use EMA min/max to normalize difficulty relative to current training stage.
-        # This prevents late-stage regularization collapse.
-        # Even if absolute loss is small, the hardest samples in that stage will get d_i=1.0.
+        # Difficulty score d_i (Entropy-based, Absolute Normalization)
+        # s_{i,y} = exp(-ell_i) : probability assigned to ground truth
+        s_iy = torch.exp(-ce_loss_per_sample)
         
-        # d_i = (loss - min) / (max - min)
-        d_i = (ce_loss_per_sample - l_min) / (l_max - l_min + 1e-8)
+        # Avoid numerical instability
+        one_minus_s = torch.clamp(1.0 - s_iy, min=1e-8)
+        
+        # H_tilde = -s_iy * log(s_iy) - (1-s_iy) * log((1-s_iy)/(C-1))
+        term1 = s_iy * ce_loss_per_sample
+        term2 = one_minus_s * (torch.log(one_minus_s) - math.log(C - 1))
+        h_tilde = term1 - term2
+        
+        # Absolute normalization: d_i = h_tilde / log(C)
+        # This is stable and interpretable - no EMA needed
+        d_i = h_tilde / math.log(C)
         d_i = torch.clamp(d_i, 0.0, 1.0)
         
-        # 2. Target Entropy
-        max_entropy = math.log(C)
+        # 2. Target Entropy (Principled, Dataset-Agnostic)
+        # Based on "effective number of confused classes" interpretation:
+        #   e^H = effective number of classes
+        # k_min: Easy samples confuse between ~k_min classes
+        # k_max: Hard samples confuse between ~k_max classes (default: sqrt(C))
+        k_min = cfg.la_e_rls.get("k_min", 2)
+        k_max_cfg = cfg.la_e_rls.get("k_max", 0)
+        k_max = k_max_cfg if k_max_cfg > 0 else math.sqrt(C)
         
-        h_min = cfg.la_e_rls.h_min
-        if cfg.la_e_rls.get("h_min_ratio", 0) > 0:
-             h_min = cfg.la_e_rls.h_min_ratio * max_entropy
-             
-        h_max = cfg.la_e_rls.h_max
-        if cfg.la_e_rls.get("h_max_ratio", 0) > 0:
-             h_max = cfg.la_e_rls.h_max_ratio * max_entropy
-
+        h_min = math.log(k_min)           # log(k_min)
+        h_max = math.log(k_max)           # log(k_max)
         h_target = h_min + (h_max - h_min) * d_i
         
-        # 3. Base RLS Distribution p_i
-        # Adaptive alpha based on difficulty (Version C)
-        # alpha_i = alpha_min + (alpha_max - alpha_min) * d_i
-        alpha = cfg.la_e_rls.alpha_min + (cfg.la_e_rls.alpha_max - cfg.la_e_rls.alpha_min) * d_i
+        # 3. Principled Alpha and Distribution (All derived from k)
+        # c: Universal scaling constant (from label smoothing: α=0.1 at k=2 → c=0.2)
+        # "When k classes are confusing, allocate c/k probability mass to non-GT"
+        c = cfg.la_e_rls.get("c", 0.2)
+        alpha_min = c / k_max             # c / k_max
+        alpha_max = c / k_min             # c / k_min
+        alpha = alpha_min + (alpha_max - alpha_min) * d_i
         
+        # Dirichlet on C-1 dimensions (non-GT classes only)
+        # Beta = 1/k_max: Expected k_max significant classes
+        beta_val = 1.0 / k_max
+        
+        # Sample Dirichlet for non-GT classes
+        concentration = torch.full((B, C - 1), beta_val, device=device)
+        m = torch.distributions.Dirichlet(concentration)
+        r_non_gt = m.sample()  # (B, C-1) - already sums to 1
+        
+        # Build p_i: GT gets (1-alpha), non-GT classes get alpha * Dirichlet
         p_i = torch.zeros(B, C, device=device)
         p_i.scatter_(1, targets.view(-1, 1), (1 - alpha).view(-1, 1))
         
-        distribution_type = cfg.la_e_rls.get("distribution_type", "power_law")
+        # Fill non-GT positions with scaled Dirichlet samples
+        mask = torch.ones(B, C, dtype=torch.bool, device=device)
+        mask.scatter_(1, targets.view(-1, 1), False)
+        p_i[mask] = (alpha.view(-1, 1) * r_non_gt).view(-1)
         
-        if distribution_type == "dirichlet":
-            # Dirichlet Distribution (The "Sexy" Option)
-            # Sample from symmetric Dirichlet with concentration beta
-            beta_val = cfg.la_e_rls.get("dirichlet_beta", 0.0)
-            
-            # Auto-scaling: If beta <= 0, set to 1/C to maintain constant sparsity
-            if beta_val <= 0:
-                beta_val = 1.0 / C
-            
-            # Create concentration tensor (B, C)
-            concentration = torch.full((B, C), beta_val, device=device)
-            m = torch.distributions.Dirichlet(concentration)
-            r = m.sample()
-        else:
-            # Power-law noise (Original)
-            # r ~ Uniform(0, 1)^k -> pushes most values towards 0, leaving few high values
-            r = torch.rand(B, C, device=device).pow(cfg.la_e_rls.power_law_exp)
-
-        # Zero out the target index in the noise term so we can explicitly control GT prob with alpha
-        r.scatter_(1, targets.view(-1, 1), 0.0)
-        
-        r_sum = r.sum(dim=1, keepdim=True) + 1e-8
-        r_norm = r / r_sum
-        
-        p_i += r_norm * alpha.view(-1, 1)
+        # Add uniform floor for long-tail (prevents zero gradients on rare classes)
+        uniform_mix = cfg.la_e_rls.get("uniform_mix", 0.0)
+        if uniform_mix > 0:
+            uniform = torch.full_like(p_i, 1.0 / C)
+            p_i = (1 - uniform_mix) * p_i + uniform_mix * uniform
         
         # 4. Hybrid Secant/Bisection Method (Brent's Method approximation)
         # Combines robustness of Bisection with speed of Newton/Secant.
@@ -293,12 +268,23 @@ def main(cfg: DictConfig):
     
     # Data
     logger.info("Preparing Data...")
-    transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
-    ])
+    
+    # Conditional augmentation
+    if cfg.data.get("use_augmentation", True):
+        transform_train = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+        ])
+        logger.info("Using data augmentation (RandomCrop, RandomHorizontalFlip)")
+    else:
+        transform_train = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+        ])
+        logger.info("Data augmentation DISABLED")
+        
     transform_test = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
@@ -320,14 +306,21 @@ def main(cfg: DictConfig):
     logger.info("Starting Training...")
     start_time = time.time()
     
-    loss_ema = LossEMA(decay=cfg.la_e_rls.get("ema_decay", 0.99))
-    
     for epoch in range(cfg.train.epochs):
-        # Cosine Increasing Schedule for Lambda
-        # lambda(t) = lambda_max * sin^2(pi/2 * t / T)
+        # Lambda Schedule
+        lambda_schedule = cfg.la_e_rls.get("lambda_schedule", "cosine")
         lambda_max = cfg.la_e_rls.lambda_val
-        progress = epoch / cfg.train.epochs
-        current_lambda = lambda_max * (math.sin(math.pi / 2 * progress) ** 2)
+        
+        if lambda_schedule == "static":
+            current_lambda = lambda_max
+        elif lambda_schedule == "cosine":
+            # Cosine Increasing Schedule
+            # lambda(t) = lambda_max * sin^2(pi/2 * t / T)
+            progress = epoch / cfg.train.epochs
+            current_lambda = lambda_max * (math.sin(math.pi / 2 * progress) ** 2)
+        else:
+            # For "adaptive", current_lambda passed in here acts as the Maximum Cap
+            current_lambda = lambda_max
         
         net.train()
         train_loss = 0
@@ -349,7 +342,7 @@ def main(cfg: DictConfig):
             optimizer.zero_grad()
             logits = net(inputs)
             
-            loss, ce, kl, d_mean, h_mean, tau_mean, lambda_used = la_e_rls_loss(logits, targets, cfg, device, loss_ema, current_lambda)
+            loss, ce, kl, d_mean, h_mean, tau_mean, lambda_used = la_e_rls_loss(logits, targets, cfg, device, current_lambda)
             
             loss.backward()
             optimizer.step()
@@ -367,12 +360,14 @@ def main(cfg: DictConfig):
             avg_tau += tau_mean.item()
             num_batches += 1
             
-            # Update tqdm bar with running averages
+            # Update tqdm bar with running averages and current values
+            current_lr = optimizer.param_groups[0]['lr']
             pbar.set_postfix({
                 'Loss': f"{train_loss/num_batches:.4f}",
                 'Acc': f"{100.*correct/total:.2f}%",
-                'Diff': f"{avg_diff/num_batches:.2f}",
-                'Tau': f"{avg_tau/num_batches:.2f}"
+                'Diff': f"{avg_diff/num_batches:.2f} ({d_mean.item():.2f})",
+                'Tau': f"{avg_tau/num_batches:.2f} ({tau_mean.item():.2f})",
+                'LR': f"{current_lr:.4f}"
             })
             
             if cfg.la_e_rls.dry_run:

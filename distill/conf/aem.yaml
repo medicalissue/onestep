@@ -1,0 +1,66 @@
+hydra:
+  run:
+    dir: outputs/rate-reg/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+wandb:
+  project: "one-pass-distill"
+  entity: null
+  name: "RateReg_${now:%Y-%m-%d_%H-%M-%S}"
+  mode: "online"
+
+data:
+  batch_size: 64
+  num_workers: 4
+  dataset_name: cifar100
+  use_augmentation: true
+
+model:
+  name: resnet20
+  num_classes: 100
+
+train:
+  epochs: 240
+  lr: 0.05
+  momentum: 0.9
+  weight_decay: 0.0005
+
+# ==============================================================================
+# Entropy Rate Regularizer
+# ==============================================================================
+# Loss = CE + λ * rate_penalty
+#
+# rate_penalty = relu(-κ - ΔH_pred)²
+#
+# where:
+#   ΔH_pred = -⟨∇H, ∇CE⟩ (lookahead entropy change)
+#
+# Key insight:
+#   - Penalize only EXCESSIVE entropy reduction per step
+#   - Allow entropy increase (overconfident wrong → correction OK)
+#   - Sample-adaptive automatically via gradient magnitudes
+#
+# Benefits:
+#   - Only 2 hyperparams: λ (strength), κ (threshold)
+#   - No explicit difficulty score needed
+#   - Easy samples: small gradients → no constraint
+#   - Hard samples: large reduction → brake applied
+# ==============================================================================
+
+aem:
+  # ---------------------------------------------------------------------------
+  # Kappa (maximum allowed entropy reduction per step)
+  # ---------------------------------------------------------------------------
+  # κ = 0.1: allow reducing entropy by at most 0.1 nats per step
+  # Interpretation: "don't sharpen too fast"
+  kappa: 0.1
+  
+  # ---------------------------------------------------------------------------
+  # Lambda (regularization strength)
+  # ---------------------------------------------------------------------------
+  lambda_schedule: "static"
+  lambda_val: 1.0
+  
+  # ---------------------------------------------------------------------------
+  # Misc
+  # ---------------------------------------------------------------------------
+  dry_run: false

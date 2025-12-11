@@ -12,6 +12,7 @@ data:
   batch_size: 64
   num_workers: 24
   dataset_name: cifar100
+  use_augmentation: true  # Toggle RandomCrop + RandomHorizontalFlip
 
 model:
   name: resnet20
@@ -21,26 +22,59 @@ train:
   epochs: 240
   lr: 0.05
   momentum: 0.9
-  weight_decay: 0.0001
-  
+  weight_decay: 0.0005
+
+# ==============================================================================
+# LA-E-RLS: Loss-Adaptive Entropy-controlled Randomized Label Smoothing
+# ==============================================================================
+# All core parameters are PRINCIPLED and derived from C (num_classes).
+# Only override if you know what you're doing.
+# ==============================================================================
+
 la_e_rls:
-  alpha_min: 0.1
-  alpha_max: 0.2
-  h_min_ratio: 0.2 # If > 0, overrides h_min (Relative to log(C))
-  h_max_ratio: 0.8 # If > 0, overrides h_max
-  h_min: 0.5
-  h_max: 3.5
-  tau_min: 0.1
-  tau_max: 5.0
-  lambda_val: 0.5
-  tau_kd: 1.0
-  power_law_exp: 2.0
-  distribution_type: "dirichlet" # Options: "power_law", "dirichlet"
-  dirichlet_beta: 0.1 # 0.0 or negative -> Auto 1/C (Ideal for sparsity)
-  bs_iters: 15
-  seed: 42
-  sorting_mode: "fully_sorted" # Options: "fully_sorted", "gt_anchored"
-  lambda_schedule: "adaptive" # Options: "cosine", "adaptive"
-  ema_decay: 0.99 # Decay rate for LossEMA
-  dry_run: false
+  # ---------------------------------------------------------------------------
+  # Effective Number of Confused Classes (k)
+  # ---------------------------------------------------------------------------
+  # k_min: Easy samples confuse between ~k_min classes
+  # k_max: Hard samples confuse between ~k_max classes
+  # Default: k_min=2, k_max=sqrt(C)  (Dataset-agnostic)
+  k_min: 2
+  k_max: 0  # 0 = auto (sqrt(C))
   
+  # ---------------------------------------------------------------------------
+  # Scaling Constant (c)
+  # ---------------------------------------------------------------------------
+  # From label smoothing: alpha=0.1 at k=2 → c = alpha * k = 0.2
+  # Alpha range: [c/k_max, c/k_min] = [c/sqrt(C), c/2]
+  c: 0.2
+  
+  # ---------------------------------------------------------------------------
+  # Temperature Search
+  # ---------------------------------------------------------------------------
+  tau_min: 0.5   # Minimum temperature (sharpest)
+  tau_max: 5.0   # Maximum temperature (flattest)
+  tau_kd: 4.0    # Distillation temperature for KL loss scaling
+  bs_iters: 15   # Binary search iterations for tau*
+  
+  # ---------------------------------------------------------------------------
+  # Lambda Schedule
+  # ---------------------------------------------------------------------------
+  # cosine: Cosine increasing from 0 to lambda_val (default)
+  # static: Fixed at lambda_val from epoch 0
+  # adaptive: Scaled by batch mastery (experimental)
+  lambda_schedule: "cosine"
+  lambda_val: 0.5  # Maximum lambda (weight of KL loss)
+  
+  # ---------------------------------------------------------------------------
+  # Sorting Mode
+  # ---------------------------------------------------------------------------
+  # fully_sorted: Sort both teacher and student distributions (shape matching)
+  # gt_anchored: Keep GT position fixed, sort only non-GT classes
+  sorting_mode: "fully_sorted"
+  
+  # ---------------------------------------------------------------------------
+  # Misc
+  # ---------------------------------------------------------------------------
+  uniform_mix: 0.0  # Uniform floor for long-tail (0.05 → 5% uniform mix)
+  seed: 42
+  dry_run: false

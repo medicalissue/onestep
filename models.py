@@ -80,5 +80,16 @@ class ResNet(nn.Module):
         out = self.fc(out)
         return out
 
+    def forward_with_features(self, x):
+        """Forward pass that also returns pre-fc features for analytical lookahead."""
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = self.layer3(out)
+        out = F.avg_pool2d(out, out.size()[3])
+        features = out.view(out.size(0), -1)  # (B, 64)
+        logits = self.fc(features)
+        return logits, features
+
 def resnet20(num_classes=10):
     return ResNet(BasicBlock, [3, 3, 3], num_classes=num_classes)

@@ -1,0 +1,95 @@
+hydra:
+  run:
+    dir: outputs/la-oracle/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+wandb:
+  project: "one-pass-distill"
+  entity: null
+  name: "LA-Oracle_${now:%Y-%m-%d_%H-%M-%S}"
+  mode: "online"
+
+data:
+  batch_size: 64
+  num_workers: 4
+  dataset_name: cifar100
+  use_augmentation: true
+
+model:
+  name: resnet20
+  num_classes: 100
+
+train:
+  epochs: 240
+  lr: 0.05
+  momentum: 0.9
+  weight_decay: 0.0005
+
+# ==============================================================================
+# Lookahead Oracle Self-Distillation
+# ==============================================================================
+# L(θ) = CE + λ·KL(q* || p_θ)
+#
+# q* is oracle distribution with:
+#   - Shape: from lookahead logits z̃ = z - η·(p-e_y)·(||h||²+1)
+#   - Entropy: matched to H* = H + clip(ΔH_pred, -κ_↓, κ_↑) via temp τ*
+#
+# ΔH_pred = -η⟨∇_z H, ∇_z CE⟩ (lookahead entropy change)
+# ==============================================================================
+
+la_oracle:
+  
+  # ---------------------------------------------------------------------------
+  # Lambda (KL weight)
+  # ---------------------------------------------------------------------------
+  lambda_schedule: "static"  # static, cosine
+  lambda_val: 0.5  # L = (1-λ)*CE + λ*KL → 0.5*CE + 0.5*KL
+  
+  # ---------------------------------------------------------------------------
+  # Temperature search (τ* for entropy matching)
+  # ---------------------------------------------------------------------------
+  tau_min: 0.1
+  tau_max: 10.0
+  bs_iters: 10
+  
+  # ---------------------------------------------------------------------------
+  # [A] Sample Weighting (hard samples get stronger KL)
+  # ---------------------------------------------------------------------------
+  # Difficulty: d_i = |ΔH_pred,i| / EMA(|ΔH_pred|)
+  # Weight: w_i = clamp(d_i, w_min, w_max)
+  #
+  # Interpretation:
+  # - Large |ΔH_pred| → CE pushing hard → hard sample → high weight
+  # - Small |ΔH_pred| → settled sample → easy → low weight
+  use_sample_weight: false
+  w_min: 0.0
+  w_max: 100.0
+  ema_decay: 0.99  # EMA decay for |ΔH_pred| estimation
+  
+  # ---------------------------------------------------------------------------
+  # [B] H* Gap Amplification (controls "how much to follow future")
+  # ---------------------------------------------------------------------------
+  # ΔH_goal *= delta_h_alpha
+  # - alpha > 1: more aggressive entropy change
+  # - alpha = 1: no change (default)
+  delta_h_alpha: 1.0
+  
+  # ---------------------------------------------------------------------------
+  # [C] Include Weight Decay in Lookahead
+  # ---------------------------------------------------------------------------
+  # If true, the lookahead also accounts for weight decay shrinkage:
+  # Δz = -η·(p - e_y)·(||h||² + 1) - η·λ_wd·z
+  # This makes the oracle more accurate to the actual parameter update.
+  include_wd_in_lookahead: true
+  
+  # ---------------------------------------------------------------------------
+  # ODE Interpretation Note
+  # ---------------------------------------------------------------------------
+  # η (lookahead time) = current_lr (automatically from optimizer).
+  # This is the natural ODE time step Δt for one optimizer step.
+  # No separate lookahead_scale needed.
+  # Regularization strength is controlled by: λ, delta_h_alpha, w_i.
+  
+  # ---------------------------------------------------------------------------
+  # Misc
+  # ---------------------------------------------------------------------------
+  dry_run: false
