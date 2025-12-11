@@ -5,7 +5,7 @@ Lookahead Oracle Self-Distillation (LA-Oracle)
 Core Idea:
   Teacher 없이, lookahead 기반으로 oracle distribution을 정의하여 self-distillation.
 
-Mathematical Framework:
+Mathtical Framework:
   1. ΔH_pred ≈ -η⟨∇_z H, ∇_z CE⟩   (lookahead entropy change)
   2. H* = H(p) + clip(ΔH_pred, -κ_↓, κ_↑)   (oracle entropy)
   3. Δz = -η·(p - e_y)·(||h||² + 1)   (exact lookahead logits via last layer)
@@ -41,6 +41,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+import random
+import numpy as np
+
+def set_seed(seed=42):
+    """Set all random seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 
 def entropy(probs):
     """Compute entropy of probability distributions. probs: (B, C) -> (B,)"""
@@ -51,16 +63,23 @@ def compute_entropy_gradient(probs):
     """
     Compute gradient of entropy w.r.t. logits.
     
-    ∂H/∂z = p·(log p + 1 + H)
+    ∂H/∂z_j = -p_j·(log p_j + H)
+    
+    Derivation:
+      H = -Σ p_c log p_c
+      ∂H/∂p_c = -log p_c - 1
+      ∂p_c/∂z_j = p_c(δ_{cj} - p_j)
+      ∂H/∂z_j = Σ_c (∂H/∂p_c)(∂p_c/∂z_j) = -p_j(log p_j + H)
     
     Args:
         probs: (B, C) softmax probabilities
     Returns:
         g_H: (B, C) gradient of H w.r.t. logits
+        H: (B,) current entropy
     """
     log_probs = torch.log(probs + 1e-8)
     H = -torch.sum(probs * log_probs, dim=1, keepdim=True)  # (B, 1)
-    g_H = probs * (log_probs + 1 + H)  # (B, C)
+    g_H = -probs * (log_probs + H)  # (B, C)  -- FIXED: was probs * (log_probs + 1 + H)
     return g_H, H.squeeze(1)
 
 
@@ -106,21 +125,24 @@ def compute_lookahead_entropy_change(probs, delta_z):
     return delta_H, H_current
 
 
-def compute_lookahead_logits(logits, probs, targets, features, eta=1.0, weight_decay=0.0):
+def compute_lookahead_logits(logits, probs, targets, features, eta=1.0, weight_decay=0.0,
+                              fc_layer=None, optimizer=None, momentum=0.0):
     """
     Compute exact lookahead logits using analytical gradient for last linear layer.
     
-    For z = W·h + b with weight decay λ_wd:
-      Full gradient: ∇CE + λ_wd·θ
+    For z = W·h + b with SGD momentum and weight decay:
+      v_W = μ·v_W_prev + g_W + λ_wd·W
+      v_b = μ·v_b_prev + g_b + λ_wd·b
       
-      W⁺ = W - η·((p - e_y)⊗h + λ_wd·W)
-      b⁺ = b - η·((p - e_y) + λ_wd·b)
+      W⁺ = W - η·v_W
+      b⁺ = b - η·v_b
       
-      z⁺ = W⁺·h + b⁺ = z - η·(p - e_y)·(||h||² + 1) - η·λ_wd·z
-    
-    Thus:
-      Δz = -η·(p - e_y)·(||h||² + 1) - η·λ_wd·z
-      z̃_oracle = z + Δz
+      z⁺ = z - η·(momentum_term + ce_term + wd_term)
+      
+    where:
+      momentum_term = μ·(v_W_prev·h + v_b_prev)  (from optimizer state)
+      ce_term = (p - e_y)·(||h||² + 1)  (current gradient contribution)
+      wd_term = λ_wd·z  (weight decay shrinkage)
     
     Args:
         logits: (B, C) current logits
@@ -129,27 +151,43 @@ def compute_lookahead_logits(logits, probs, targets, features, eta=1.0, weight_d
         features: (B, D) pre-fc features
         eta: learning rate (ODE time step)
         weight_decay: weight decay coefficient (0 to disable)
+        fc_layer: nn.Linear layer (for momentum buffer access)
+        optimizer: optimizer with state dict (for momentum buffer access)
+        momentum: momentum coefficient (0 to disable)
     Returns:
         z_oracle: (B, C) lookahead oracle logits
         delta_z: (B, C) logit change
     """
     B, C = logits.size()
+    device = logits.device
     
-    # CE gradient w.r.t. logits
+    # CE gradient w.r.t. logits: g_CE = p - e_y
     g_CE = compute_ce_gradient(probs, targets)  # (B, C)
     
     # Feature norm squared + 1 (for bias term)
     h_norm_sq = torch.sum(features ** 2, dim=1, keepdim=True)  # (B, 1)
     scale = h_norm_sq + 1.0  # (B, 1)
     
-    # Δz from CE: -η·(p - e_y)·(||h||² + 1)
-    delta_z_ce = -eta * g_CE * scale  # (B, C)
+    # CE term: (p - e_y)·(||h||² + 1)
+    ce_term = g_CE * scale  # (B, C)
     
-    # Δz from weight decay: -η·λ_wd·z (shrinks logits towards 0)
-    delta_z_wd = -eta * weight_decay * logits  # (B, C)
+    # Momentum term from optimizer state
+    momentum_term = torch.zeros_like(logits)
+    if momentum > 0 and fc_layer is not None and optimizer is not None:
+        state_W = optimizer.state.get(fc_layer.weight, {})
+        state_b = optimizer.state.get(fc_layer.bias, {})
+        
+        if 'momentum_buffer' in state_W and 'momentum_buffer' in state_b:
+            v_W = state_W['momentum_buffer']  # (C, D)
+            v_b = state_b['momentum_buffer']  # (C,)
+            # momentum_term = μ·(v_W·h + v_b) for each sample
+            momentum_term = momentum * (features @ v_W.T + v_b.unsqueeze(0))  # (B, C)
     
-    # Total Δz
-    delta_z = delta_z_ce + delta_z_wd
+    # Weight decay term: λ_wd·z
+    wd_term = weight_decay * logits  # (B, C)
+    
+    # Total Δz = -η·(momentum_term + ce_term + wd_term)
+    delta_z = -eta * (momentum_term + ce_term + wd_term)
     
     # Oracle logits
     z_oracle = logits + delta_z
@@ -198,12 +236,14 @@ def find_tau_star(z_oracle, H_target, tau_min=0.1, tau_max=10.0, n_iters=10):
         tau_lo = torch.where(~mask_too_flat, tau, tau_lo)
         
         # Secant step (gradient-based acceleration)
-        # dH/dτ = Var(z_oracle/τ) / τ² = (E[z²] - E[z]²) / τ³
+        # dH/dτ = Var_q[z] / τ³
+        # With z_scaled = z/τ: Var[z_scaled] = Var[z]/τ²
+        # So: dH/dτ = Var[z_scaled] * τ² / τ³ = Var[z_scaled] / τ
         z_scaled = z_oracle / tau_expanded
         E_z = torch.sum(q * z_scaled, dim=1)
         E_z2 = torch.sum(q * z_scaled ** 2, dim=1)
-        var_z = E_z2 - E_z ** 2
-        dH_dtau = var_z / (tau ** 2 + 1e-10)
+        var_z_scaled = E_z2 - E_z ** 2  # = Var[z]/τ²
+        dH_dtau = var_z_scaled / (tau + 1e-10)  # = Var[z]/τ³ ✓
         
         # Newton step: τ_new = τ - diff / dH_dtau
         tau_secant = tau - diff / (dH_dtau + 1e-10)
@@ -223,34 +263,37 @@ def find_tau_star(z_oracle, H_target, tau_min=0.1, tau_max=10.0, n_iters=10):
     return tau_star, q_star
 
 
-def la_oracle_loss(logits, features, targets, cfg, current_lambda, current_lr, delta_h_ema=None):
+def la_oracle_loss(logits, features, targets, cfg, current_lambda, current_lr,
+                    fc_layer=None, optimizer=None):
     """
     Compute Lookahead Oracle Self-Distillation loss.
     
     ODE Interpretation:
       Oracle q* is the CE ODE solution integrated forward by time Δt = current_lr.
-      This is the natural time unit of one optimizer step.
+      This includes momentum buffer for accurate lookahead.
     
-    L(θ) = CE + λ·w_i·KL(q* || p_θ)
+    L(θ) = mean_i[(1-λ_i)*CE_i + λ_i*KL_i]
     
-    Enhancements:
-      A. Sample weighting: w_i = clamp(|ΔH_pred,i| / EMA(|ΔH_pred|), w_min, w_max)
-         - Uses lookahead entropy change as difficulty measure
-      B. H* gap amplification: ΔH_goal *= delta_h_alpha
+    Sample-Adaptive λ (Batch-Relative Difficulty):
+      d_i = |ΔH_pred,i| / batch_mean(|ΔH_pred|)
+      λ_i = clamp(d_i / 2, 0, 0.5)
     
-    Note: η (lookahead time) = current_lr. No separate lookahead_scale needed.
-          Regularization strength is controlled by λ, delta_h_alpha, w_i.
+    Lookahead Δz includes:
+      - momentum_term: μ·(v_W·h + v_b) from optimizer state
+      - ce_term: (p - e_y)·(||h||² + 1) from current gradient
+      - wd_term: λ_wd·z from weight decay
     
     Args:
         logits: (B, C) model logits
         features: (B, D) pre-fc features
         targets: (B,) ground truth indices
         cfg: config with hyperparameters
-        current_lambda: KL weight (may be scheduled)
+        current_lambda: KL weight (used when sample_weight=False)
         current_lr: current learning rate (= ODE time step Δt)
-        delta_h_ema: EMA of |ΔH_pred| for sample weighting (optional)
+        fc_layer: nn.Linear layer for momentum buffer access
+        optimizer: SGD optimizer with momentum buffers
     Returns:
-        total_loss, ce_loss, kl_loss, diagnostics, updated delta_h_ema
+        total_loss, ce_loss, kl_loss, diagnostics
     """
     B, C = logits.size()
     device = logits.device
@@ -276,6 +319,10 @@ def la_oracle_loss(logits, features, targets, cfg, current_lambda, current_lr, d
     include_wd_in_lookahead = cfg.la_oracle.get("include_wd_in_lookahead", False)
     weight_decay = cfg.train.weight_decay if include_wd_in_lookahead else 0.0
     
+    # Enhancement D: Include momentum in lookahead
+    include_momentum_in_lookahead = cfg.la_oracle.get("include_momentum_in_lookahead", False)
+    momentum = cfg.train.momentum if include_momentum_in_lookahead else 0.0
+    
     # 1. Current probabilities
     probs = F.softmax(logits, dim=1)
     
@@ -287,7 +334,8 @@ def la_oracle_loss(logits, features, targets, cfg, current_lambda, current_lr, d
     with torch.no_grad():
         # 3a. Lookahead logits (exact, analytical) - compute Δz first
         z_oracle, delta_z = compute_lookahead_logits(
-            logits, probs, targets, features, eta=eta, weight_decay=weight_decay
+            logits, probs, targets, features, eta=eta, weight_decay=weight_decay,
+            fc_layer=fc_layer, optimizer=optimizer, momentum=momentum
         )
         
         # 3b. Entropy change using actual Δz (consistent with logit change)
@@ -295,13 +343,6 @@ def la_oracle_loss(logits, features, targets, cfg, current_lambda, current_lr, d
         
         # Difficulty metric: |ΔH_pred| - how much optimizer wants to move this sample's entropy
         abs_delta_H = torch.abs(delta_H_pred)  # (B,)
-        abs_delta_H_mean = abs_delta_H.mean()
-        
-        # Update EMA of |ΔH_pred| for sample weighting
-        if delta_h_ema is None:
-            delta_h_ema_new = abs_delta_H_mean
-        else:
-            delta_h_ema_new = ema_decay * delta_h_ema + (1 - ema_decay) * abs_delta_H_mean
         
         # H* gap amplification (controls "how much to follow future")
         delta_H_goal = delta_h_alpha * delta_H_pred
@@ -321,13 +362,16 @@ def la_oracle_loss(logits, features, targets, cfg, current_lambda, current_lr, d
     # KL per sample: sum over classes
     kl_per_sample = torch.sum(q_star * (torch.log(q_star + 1e-8) - log_probs), dim=1)  # (B,)
     
-    # Sample-adaptive λ based on difficulty |ΔH_pred|
+    # Sample-adaptive λ based on BATCH-RELATIVE difficulty
+    # Pure local oracle: only uses current batch statistics, no EMA
+    # d_i = |ΔH_pred,i| / batch_mean(|ΔH_pred|)
     # d_i = 1 (average) → λ_i = 0.5
-    # d_i = 2+ (hard)   → λ_i = 1.0 (all KL, no CE)
+    # d_i ≥ 1 (hard)    → λ_i = 0.5 (max, clamped)
     # d_i = 0 (easy)    → λ_i = 0.0 (all CE, no KL)
     if use_sample_weight:
-        d_i = abs_delta_H / (delta_h_ema_new + 1e-6)  # centered at 1
-        lambda_i = torch.clamp(d_i / 2.0, 0.0, 1.0)  # d=1→λ=0.5, d=2→λ=1, d=0→λ=0
+        batch_mean = abs_delta_H.mean() + 1e-6  # batch-local reference
+        d_i = abs_delta_H / batch_mean  # centered at 1 within batch
+        lambda_i = torch.clamp(d_i / 2.0, 0.0, 0.5)  # d=1→λ=0.5, d≥1→λ=0.5, d=0→λ=0
         
         # Per-sample convex loss: (1-λ_i)*CE_i + λ_i*KL_i
         loss_per_sample = (1 - lambda_i) * ce_per_sample + lambda_i * kl_per_sample
@@ -337,13 +381,12 @@ def la_oracle_loss(logits, features, targets, cfg, current_lambda, current_lr, d
         # No sample weighting: use global λ
         total_loss = (1 - current_lambda) * ce_loss + current_lambda * kl_per_sample.mean()
         avg_weight = torch.tensor(current_lambda)
-        delta_h_ema_new = None
     
     # Diagnostics
     with torch.no_grad():
         delta_z_norm = torch.norm(delta_z, dim=1).mean()
     
-    return total_loss, ce_loss, kl_per_sample.mean(), H_current.mean(), H_target.mean(), tau_star.mean(), delta_z_norm, avg_weight, delta_h_ema_new
+    return total_loss, ce_loss, kl_per_sample.mean(), H_current.mean(), H_target.mean(), tau_star.mean(), delta_z_norm, avg_weight
 
 
 @hydra.main(version_base=None, config_path="distill/conf", config_name="la_oracle")
@@ -351,6 +394,10 @@ def main(cfg: DictConfig):
     logger.info(f"Config:\n{OmegaConf.to_yaml(cfg)}")
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Set seed for reproducibility
+    set_seed(42)
+    logger.info("Seed set to 42 for reproducibility")
     
     # Data
     logger.info("Preparing Data...")
@@ -392,7 +439,6 @@ def main(cfg: DictConfig):
     start_time = time.time()
     
     best_acc = 0.0
-    delta_h_ema = None  # EMA of |ΔH_pred| for sample weighting
     
     for epoch in range(cfg.train.epochs):
         # Lambda Schedule
@@ -433,8 +479,9 @@ def main(cfg: DictConfig):
             # Get current learning rate from optimizer (= ODE time step Δt)
             current_lr = optimizer.param_groups[0]['lr']
             
-            loss, ce, kl, h_cur, h_tgt, tau, dz_norm, w_avg, delta_h_ema = la_oracle_loss(
-                logits, features, targets, cfg, current_lambda, current_lr, delta_h_ema
+            loss, ce, kl, h_cur, h_tgt, tau, dz_norm, w_avg = la_oracle_loss(
+                logits, features, targets, cfg, current_lambda, current_lr,
+                fc_layer=net.fc, optimizer=optimizer
             )
             
             loss.backward()

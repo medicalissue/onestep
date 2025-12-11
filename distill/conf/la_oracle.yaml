@@ -60,7 +60,7 @@ la_oracle:
   # Interpretation:
   # - Large |ΔH_pred| → CE pushing hard → hard sample → high weight
   # - Small |ΔH_pred| → settled sample → easy → low weight
-  use_sample_weight: false
+  use_sample_weight: true  # Set to true to enable sample weighting
   w_min: 0.0
   w_max: 100.0
   ema_decay: 0.99  # EMA decay for |ΔH_pred| estimation
@@ -80,6 +80,15 @@ la_oracle:
   # Δz = -η·(p - e_y)·(||h||² + 1) - η·λ_wd·z
   # This makes the oracle more accurate to the actual parameter update.
   include_wd_in_lookahead: true
+  
+  # ---------------------------------------------------------------------------
+  # [D] Include Momentum in Lookahead
+  # ---------------------------------------------------------------------------
+  # If true, the lookahead uses the momentum buffer from optimizer state:
+  # Δz = -η·(momentum_term + ce_term + wd_term)
+  # where momentum_term = μ·(v_W·h + v_b)
+  # This is important since μ=0.9 means 90% of update comes from momentum!
+  include_momentum_in_lookahead: true
   
   # ---------------------------------------------------------------------------
   # ODE Interpretation Note
