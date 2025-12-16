@@ -1,0 +1,38 @@
+# Velocity Oracle Distillation Configuration
+# Learn From Your Future: v_φ(z) ≈ E[Δz | z]
+
+# Training parameters
+train:
+  epochs: 240
+  batch_size: 64
+  lr: 0.05
+  momentum: 0.9
+  weight_decay: 0.0005
+  seed: 42
+  save_every: 50
+
+# Data parameters
+data:
+  dataset: "cifar100"
+  use_augmentation: true
+
+# Velocity predictor parameters
+velocity:
+  # Predictor architecture
+  hidden_dim: 256
+  lr: 0.001  # Adam LR for predictor
+  
+  # K-step lookahead
+  # K=1: almost same as current (weak oracle)
+  # K→∞: converges to implicit teacher
+  K: 5
+  
+  # Distillation weight: L = (1-λ)*CE + λ*KL
+  lambda_kl: 100
+  
+  # Delayed supervision weight
+  # Higher = more emphasis on real epoch-level dynamics
+  beta_delayed: 1.0
+  
+  # Dry run for testing
+  dry_run: false

@@ -47,37 +47,121 @@ la_oracle:
   # ---------------------------------------------------------------------------
   # Temperature search (τ* for entropy matching)
   # ---------------------------------------------------------------------------
-  # τ* is found via bisection to match H(q*) = H*
-  # This controls the SHAPE of the oracle distribution
+  # τ* is found via bisection to match H(q*) = target entropy
+  # tau_star_mode options:
+  #   - "target": match H_target (lookahead entropy H* = H + ΔH)
+  #   - "current": match H_current (preserve current entropy, only change shape)
+  #   - "fixed": use fixed tau value (like standard KD)
+  #   - "none": skip bisection, use τ=1
+  #   - "zscore": z-score normalize both teacher & student logits (no temperature!)
+  #              → Pure shape matching, scale-invariant
+  # Set use_tau_star=false to skip bisection entirely
+  use_tau_star: true
+  tau_star_mode: "zscore"  # Options: target, current, fixed, none, zscore
+  tau_fixed_value: 4.0  # Only used when tau_star_mode="fixed"
   tau_min: 0.1
-  tau_max: 10.0
+  tau_max: 3.0
   bs_iters: 10
+  
+  # ---------------------------------------------------------------------------
+  # F-Divergence Selection
+  # ---------------------------------------------------------------------------
+  # divergence_type options:
+  #   - "kl": Forward KL(q*||p) - mean-seeking, standard KD
+  #   - "rkl": Reverse KL(p||q*) - mode-seeking
+  #   - "js": Jensen-Shannon - symmetric, balanced
+  divergence_type: "kl"
   
   # ---------------------------------------------------------------------------
   # KD Temperature (T for gradient smoothing)
   # ---------------------------------------------------------------------------
-  # T > 1 softens both q* and p before KL, spreading gradient across all classes
-  # This fixes FKL's "tail-ignoring" problem
-  # τ* controls entropy (shape), T controls gradient flow
+  # T > 1 softens both q* and p before divergence, spreading gradient
   # Uses T² scaling to maintain gradient magnitude (standard KD)
-  kd_temperature: 4.0  # Classic KD value
+  kd_temperature: 1.0  # Classic KD value = 4.0
   
   # ---------------------------------------------------------------------------
-  # [A] Sample Weighting (hard samples get stronger KL)
+  # [A] Sample Weighting (selectable method)
   # ---------------------------------------------------------------------------
-  # Difficulty: d_i = |ΔH_pred,i| / EMA(|ΔH_pred|)
-  # Weight: w_i = clamp(d_i, w_min, w_max)
+  # weight_method options:
+  #   - "loss_magnitude": λ_i = CE_i/(CE_i+KL_i) - auto-balancing per sample
+  #   - "entropy_magnitude": λ_i = H_cur/(H_cur+H_tgt) - entropy-based balance
+  #   - "softmax": λ_i ∝ softmax(|ΔH_pred|) - competition among samples
+  #   - "log_softmax": λ_i ∝ softmax(log|ΔH_pred|) - less extreme competition
+  #   - "clamp": λ_i = clamp(d_i/2, 0, 0.5) - batch-relative with clamping
+  #   - "fixed": use global lambda_val with no adaptation
+  use_sample_weight: false
+  weight_method: "clamp"  # Options: loss_magnitude, entropy_magnitude, softmax, log_softmax, clamp, fixed
+  weight_temperature: 1.0  # Only used for softmax/log_softmax methods
+  
+  # ---------------------------------------------------------------------------
+  # [B] Oracle Type Selection (NEW!)
+  # ---------------------------------------------------------------------------
+  # Oracle = teacher distribution을 생성하는 logits
   #
-  # Interpretation:
-  # - Large |ΔH_pred| → CE pushing hard → hard sample → high weight
-  # - Small |ΔH_pred| → settled sample → easy → low weight
-  use_sample_weight: true  # Set to true to enable sample weighting
-  w_min: 0.0
-  w_max: 100.0
-  ema_decay: 0.99  # EMA decay for |ΔH_pred| estimation
-  
+  # "lookahead": 기존 방식 - analytical gradient로 한 스텝 후 logits 예측
+  #              z_oracle = z - η·Δz (정확하지만 wrong samples에서 예측 안맞음)
+  #
+  # "centroid": Memory bank의 같은 클래스 샘플들 평균
+  #             - Wrong samples에서 99.4% rank match (vs lookahead 0.5%)
+  #             - "학습 완료 후 도달해야 할 위치"를 직접 지시
+  #             - z_oracle = (1-α)·z + α·centroid
+  #
+  # "knn": k-NN weighted average
+  #        - Centroid보다 더 local/personalized
+  #        - Outlier에 덜 민감
+  #
+  # "adaptive": Confidence에 따라 blend_alpha 자동 조절
+  #             - High conf → 약한 blend (미세 조정)
+  #             - Low conf → 강한 blend (aggressive move to centroid)
+  #
+  # "subcluster": 클래스별 k개의 sub-cluster를 logit space에서 유지
+  #               - 같은 클래스 내에서도 sub-group이 있음 (개→늑대 vs 개→고양이)
+  #               - O(k) lookup (vs k-NN의 O(N)) → 훨씬 빠름
+  #               - EMA로 온라인 학습
+  oracle_type: "subcluster"  # Options: lookahead, centroid, knn, adaptive, subcluster
+  oracle_k: 5              # k for k-NN oracle (knn, adaptive)
+  blend_alpha: 0.5         # blend ratio for centroid/knn (0=current, 1=pure oracle)
+
+  # SubCluster options (only used when oracle_type="subcluster")
+  k_clusters: 4            # number of sub-clusters per class
+  subcluster_ema_decay: 0.99  # EMA decay for sub-cluster centroids
+
   # ---------------------------------------------------------------------------
-  # [B] H* Gap Amplification (controls "how much to follow future")
+  # [C] Entropy Estimator Selection
+  # ---------------------------------------------------------------------------
+  # "shannon": 기존 방식 (per-sample Shannon entropy + lookahead ΔH)
+  # "kl": Same-class k-NN estimator (logit space)
+  #       - z_oracle (lookahead logits)에서 **같은 클래스** 샘플과의 거리로 entropy 추정
+  #       - k-NN distance 큼 = 클래스 내 outlier = 어려운 샘플 = higher H_target
+  #       - k-NN distance 작음 = 클래스 중심 = 쉬운 샘플 = lower H_target
+  entropy_estimator: "shannon"  # kl is slow, use shannon for fast POC
+
+  # KL estimator parameters (only used when entropy_estimator="kl")
+  kl_k: 3           # k for k-NN (1 = nearest neighbor)
+  kl_h_min: null     # minimum target entropy
+  kl_h_max: null    # maximum target entropy (null = log(num_classes))
+
+  # Memory bank for same-class k-NN (solves batch size limitation)
+  # With CIFAR-100 (100 classes) and batch_size=64, avg 0.64 samples/class
+  # Memory bank stores recent z_oracle per class for sufficient k-NN neighbors
+  use_memory_bank: true
+  memory_queue_size: 128  # samples per class (total: 100 * 64 = 6400)
+
+  # EMA for adaptive H_target bounds
+  # Tracks realistic H_min/H_max from observed entropy during training
+  # Instead of using fixed [0, log(C)] which may be unrealistic
+  use_entropy_ema: true
+  entropy_ema_decay: 0.9  # EMA decay (0.99 = slow, 0.9 = fast)
+
+  # Combined difficulty: k-NN + confidence
+  # k-NN only의 문제: High k-NN + High confidence 샘플을 "어렵다"고 잘못 판단
+  # 실제로는 100% accuracy인데 불필요한 soft teacher 적용
+  # Combined: difficulty = (1 - conf_weight) * knn_diff + conf_weight * (1 - conf)
+  use_confidence: true
+  conf_weight: 0.5  # 0=k-NN only, 1=confidence only, 0.5=balanced
+
+  # ---------------------------------------------------------------------------
+  # [C] H* Gap Amplification (only for shannon mode)
   # ---------------------------------------------------------------------------
   # ΔH_goal *= delta_h_alpha
   # - alpha > 1: more aggressive entropy change
@@ -85,7 +169,7 @@ la_oracle:
   delta_h_alpha: 1.0
   
   # ---------------------------------------------------------------------------
-  # [C] Include Weight Decay in Lookahead
+  # [D] Include Weight Decay in Lookahead
   # ---------------------------------------------------------------------------
   # If true, the lookahead also accounts for weight decay shrinkage:
   # Δz = -η·(p - e_y)·(||h||² + 1) - η·λ_wd·z
@@ -93,7 +177,7 @@ la_oracle:
   include_wd_in_lookahead: true
   
   # ---------------------------------------------------------------------------
-  # [D] Include Momentum in Lookahead
+  # [E] Include Momentum in Lookahead
   # ---------------------------------------------------------------------------
   # If true, the lookahead uses the momentum buffer from optimizer state:
   # Δz = -η·(momentum_term + ce_term + wd_term)

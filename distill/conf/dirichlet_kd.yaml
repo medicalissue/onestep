@@ -1,0 +1,91 @@
+hydra:
+  run:
+    dir: outputs/dirichlet-kd/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+data:
+  batch_size: 64
+  num_workers: 4
+
+model:
+  num_classes: 100
+
+train:
+  epochs: 240
+  lr: 0.05
+  momentum: 0.9
+  weight_decay: 0.0005
+  milestones: [150, 180, 210]
+  gamma: 0.1
+  seed: 42
+
+kd:
+  teacher_checkpoint: "cifar100_resnet56-f2eff4c8 (1).pt"
+
+# ==============================================================================
+# Dirichlet KD Hyperparameters
+# ==============================================================================
+#
+# Loss = (1-λ)·CE + λ·KL(Dir(α_T) || Dir(α_S))
+#
+# α_i = s(z) · π_i
+# where:
+#   π = softmax(z/T)      # shape (class relations)
+#   s(z) = κ · Var(z)     # scale (evidence/confidence)
+#
+# ==============================================================================
+
+dirichlet:
+  # T: shape temperature
+  # - Higher T = softer class relations (more knowledge transfer)
+  # - Standard KD uses T=4
+  T: 1.0
+
+  # ---------------------------------------------------------------------------
+  # Evidence Type: how to compute α (Dirichlet parameters)
+  # ---------------------------------------------------------------------------
+  # "norm": α = softmax(z/T) * κ * ||z||
+  #         - Uses L2 norm of logits as confidence/evidence
+  #         - Larger norm = higher confidence = sharper Dirichlet
+  #
+  # "evidential": α = κ * softplus(z) + 1
+  #               - Evidential Deep Learning style
+  #               - Each logit directly maps to evidence
+  #               - +1 is the prior (uniform Dirichlet)
+  evidence_type: "evidential"  # Options: norm, evidential
+
+  # κ: evidence scale
+  # - How strongly to interpret logit magnitude as confidence
+  # - For norm: α_0 ≈ κ * ||z||
+  # - For evidential: α_0 ≈ κ * sum(softplus(z)) + K
+  kappa: 1.0
+
+  # λ: distillation weight
+  # - Balance between CE and Dirichlet KL
+  lambda_kd: 0.5
+
+  # Divergence type
+  # Options: "kl", "rkl", "js"
+  # - "kl": KL(T || S) - forward KL, standard KD direction
+  # - "rkl": KL(S || T) - reverse KL, mode-seeking
+  # - "js": Jensen-Shannon divergence, symmetric
+  divergence: "rkl"
+
+  # Scale by α₀ (T² analogue for gradient restoration)
+  # ---------------------------------------------------------------------------
+  # Options: "none", "grad", "detach"
+  # - "none": no scaling
+  # - "grad": α₀ * KL, gradient flows through α₀ (penalizes high confidence)
+  # - "detach": α₀.detach() * KL, only magnitude correction (recommended)
+  #
+  # Why detach?
+  # - "grad" adds ∂L/∂α₀ = KL/K > 0, which penalizes high α₀
+  # - This makes student avoid confidence → slow scale convergence
+  # - "detach" only corrects gradient magnitude without penalty
+  scale_by_alpha0: "detach"
+
+  # Normalize loss by K (number of classes)
+  # Options: "none", "k", "sqrt_k"
+  # - "none": no normalization
+  # - "k": divide by K (per-class average)
+  # - "sqrt_k": divide by sqrt(K)
+  normalize_by_k: "k"

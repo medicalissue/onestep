@@ -1,0 +1,29 @@
+hydra:
+  run:
+    dir: outputs/entropy-matched-kd/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+data:
+  batch_size: 64
+  num_workers: 4
+
+model:
+  num_classes: 100
+
+train:
+  seed: 42
+  epochs: 240
+  lr: 0.05
+  momentum: 0.9
+  weight_decay: 0.0005
+
+kd:
+  # Pretrained checkpoints
+  teacher_checkpoint: "cifar100_resnet56-f2eff4c8 (1).pt"
+  student_ref_checkpoint: "cifar100_resnet20-23dac2f1.pt"
+
+  # Loss weight: L = (1-alpha)*CE + alpha*KL
+  alpha: 0.5
+
+  # Temperature search range for bisection
+  t_min: 0.1
+  t_max: 20.0
